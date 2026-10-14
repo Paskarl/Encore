@@ -1,0 +1,17 @@
+# Build output
+build/
+*.obj
+*.exp
+*.lib
+*.pdb
+
+# Runtime output and dumps derived from the game's code: keep local, never commit
+rescan_poc.log
+rescan_poc_methods.tsv
+*.tsv
+carve/
+*.bin
+*_slice*.dll
+
+# Screenshots from tools/gamectl.ps1
+*.png

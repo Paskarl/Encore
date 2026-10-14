@@ -40,7 +40,7 @@ Encore is meant to become the bridge between Clone Hero and external tools:
 | Trigger interface for other applications (local HTTP: `POST /rescan`, `GET /status`) | **Working**, see [Trigger from other applications](#trigger-from-other-applications) |
 | Bridge / folder-watcher integration | **Working** as a song folder watcher that works with any downloader, see [Rescan automatically after downloads](#rescan-automatically-after-downloads) |
 | Companion web app: search and download | Planned |
-| Remote song queueing | Research needed: song selection in the game is not reverse engineered yet |
+| Remote song queueing | **Researched**, prototype next: the game's setlist works as a queue, see [docs/ANALYSIS.md](docs/ANALYSIS.md#7-song-queueing-research) |
 
 Today Encore does one thing: start the same full scan as *Settings → General → Scan Songs* while
 the song list is open, either when you press **F5** or when another application asks for it over

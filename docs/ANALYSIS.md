@@ -184,6 +184,122 @@ coroutine refreshes it:
   - What [`tools/gamectl.ps1`](../tools/gamectl.ps1) can verify is the F5 handler outside the song
     list. The real F5 test in the song list was done by hand.
 
+## 7. Song queueing research
+
+**Goal:** queue a song from outside the game (e.g. a phone) so that it plays next, also while
+others are already playing. Status: static analysis done, no prototype yet. Conclusions are
+inferred from decompiled code; nothing below has been exercised at runtime.
+
+### Method
+
+- `ENCORE_DUMP_FILTER` selects which classes the dump covers; `*` dumps all 1451 classes of
+  `CloneHero.dll`. The full dump is what made it possible to find obfuscated classes by their field
+  types: searching for `List<SongEntry>` revealed the song library class.
+- [`tools/find-callers.ps1`](../tools/find-callers.ps1) separated real methods from decoys again.
+- [`tools/find-refs.ps1`](../tools/find-refs.ps1) is new: it lists RIP-relative references to a
+  global. IL2CPP reaches a class's static fields through a global holding the class pointer (e.g.
+  `DAT_183c9d098`), so this finds every function that uses a class's statics, which call-site
+  scanning can't. Sanity check: it finds all 5 accesses in `SetlistMenu.Add`.
+- Slice ranges used: `88000-8f000` (SongSelect), `13c000-13f000` (SetlistMenu), `15d000-164000`
+  (EndOfSong), `16f000-179000` (song library), `232000-23a000` (GlobalVariables), `296000-29b000`
+  (SongOptions).
+
+### The song library class (obfuscated name, class pointer global `DAT_183c9d098`)
+
+A static class with only static fields; it is identifiable by holding a
+`Dictionary<checksum, List<SongEntry>>` and several `List<SongEntry>`. Static field offsets follow
+declaration order:
+
+| Offset | Type | Meaning |
+|---|---|---|
+| `+0x00` | `List<SongEntry>` | song list (exact role not yet confirmed; read by the rescan's list refresh) |
+| `+0x08` | `Dictionary<checksum, List<SongEntry>>` | songs by chart checksum |
+| `+0x20` | `List<SongEntry>` | **setlist songs** |
+| `+0x28` | `List<int>` | **setlist song speed per entry** |
+| `+0x30` | `List<string>` | setlist string per entry (meaning unknown, filled with a constant) |
+| `+0x48` | `List<entry>` | entries visible in the song list (songs and folders) |
+
+Relevant static methods:
+
+| RVA | Signature | Meaning | Evidence |
+|---|---|---|---|
+| `0x16f370` | `entry X(int)` | visible list entry at index | reads `+0x48`; 18 callers in SongSelect |
+| `0x171ff0` | `void X()` | clear the setlist | empties `+0x20`, `+0x28`, `+0x30` |
+| `0x174950` | `bool X(checksum, out SongEntry)` | find a song by checksum | 9 callers |
+| `0x1779f0` | `SongEntry X(Func<SongEntry,bool>)` | find first matching song | callers only in `SongSelectSearch` |
+
+`SongEntry` exposes readable getters such as `get_Name_StrippedTags`, `get_Artist_StrippedTags` and
+`get_ChecksumString`, which a lookup by title/artist or checksum can use.
+
+### Adding to the setlist: `SetlistMenu.Add(SongEntry, int, string)` @ `0x13deb0`
+
+`SetlistMenu` has three methods with this signature. `find-callers` shows `0x13deb0` with 8 callers
+(SongSelect, SongOptions, one more class), `0x13c650` with 1 and `0x13cd10` with none.
+
+`0x13deb0`:
+1. if the setlist panel is not active: activates and shows it;
+2. appends the song to `+0x20`, the int to `+0x28`, the string to `+0x30`;
+3. refreshes the setlist display through several virtual `BaseMenu` calls.
+
+The caller in the song list (`SongSelect` @ `0x88c20`, the "add to setlist" button):
+- returns in practice mode (`GlobalVariables.isPracticeEnabled`);
+- takes the highlighted entry via `0x16f370(selectedIndex)`;
+  - single song: `SetlistMenu.Add(song, <song speed setting>, <string constant>)`;
+  - folder: adds every song in it;
+- if the setlist has focus and is not empty, the same button starts the setlist instead
+  (`SongSelect` @ `0x8d260`).
+
+The int is the current value of a settings object (settings class statics `+0x10`). In
+`EndOfSong` the same object is set to `GlobalVariables.originalSongSpeed` and to the setlist's int,
+so the int is the **song speed**.
+
+### Playing the setlist: `EndOfSong` "continue" @ `0x160260`
+
+`GlobalVariables` (static `instance`) holds `currentSongEntry` (+0x28), `setlistIndex` (+0x58),
+`originalSongSpeed` (+0x5c) and `isPlayingSetlist` (+0x74). The continue action on the end-of-song
+screen does:
+
+```c
+if (!gv.isPlayingSetlist) {                 // quickplay
+    songSpeed.Set(gv.originalSongSpeed); load menu scene;
+} else if (!this.isLastSong) {              // EndOfSong +0xa1
+    gv.setlistIndex++;
+    songSpeed.Set(setlistSpeeds[gv.setlistIndex]);
+    gv.currentSongEntry = setlistSongs[gv.setlistIndex];
+    load gameplay scene;
+} else {                                    // setlist finished
+    ClearSetlist(); gv.setlistIndex = 1; songSpeed.Set(gv.originalSongSpeed); load menu scene;
+}
+```
+
+The next song is read **live from the static setlist list** when "continue" is pressed.
+
+### Conclusions for queueing
+
+- **In the menu:** queueing a song means adding it to the setlist, either through
+  `SetlistMenu.Add` (needs the menu scene, shows the setlist panel) or by appending to the three
+  static lists. The players then start the setlist as usual.
+- **During a setlist:** appending to the three static lists (song, speed, string, kept in sync)
+  makes the song play after the current setlist songs. `SetlistMenu` does not exist in the gameplay
+  scene, so this is the only way there.
+- **During quickplay** there is no queue: the end screen returns to the menu. Turning a quickplay
+  session into a setlist session is not covered by this research.
+- **Finding the song:** by chart checksum (`0x174950`, or the `+0x08` dictionary), which matches how
+  chart sites identify charts, or by iterating a `List<SongEntry>` and comparing title/artist.
+
+### Open questions
+
+- When does `EndOfSong` set `isLastSong` (+0xa1)? If it is computed when the end screen opens, a
+  song appended after that point is ignored for this transition (likely a small race window).
+- What the `List<string>` entries mean, and the value of the constant `SongSelect` passes.
+- Which static `List<SongEntry>` holds all songs (vs. filtered views); a runtime count check will
+  tell.
+- Whether appending while `SetlistMenu` is open needs a display refresh, and whether online/
+  multiplayer setlists use the same lists.
+- Update resistance: the library class must be found structurally (static
+  `Dictionary<_, List<SongEntry>>`), the setlist lists by their position (`List<SongEntry>`,
+  `List<int>`, `List<string>` in a row), and `SetlistMenu.Add` by the caller test.
+
 ## After a game update
 
 1. Install the freshly built `version.dll`, start the game and read `encore.log`.

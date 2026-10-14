@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a">
+<title>Encore</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --text: #16181d; --muted: #646a75; --line: #e1e4e9;
+  --accent: #3f5bd9; --accent-text: #ffffff; --ok: #1d8a4e; --warn: #b5590f; --bad: #c0322b; --now: #eef1ff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a; --panel: #1d2026; --text: #eceef2; --muted: #9aa0ab; --line: #2c3038;
+    --accent: #7d93ff; --accent-text: #0f1220; --ok: #4cc98a; --warn: #f0a25a; --bad: #ff7b72; --now: #262c44;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 12px 16px 8px; border-bottom: 1px solid var(--line); }
+.bar { display: flex; align-items: center; gap: 8px; }
+h1 { font-size: 1.2rem; margin: 0; flex: 1; }
+.pill { font-size: .8rem; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.ok { color: var(--ok); border-color: currentColor; }
+.pill.warn { color: var(--warn); border-color: currentColor; }
+.pill.bad { color: var(--bad); border-color: currentColor; }
+input[type=search] { width: 100%; margin-top: 10px; padding: 12px 14px; font-size: 1rem; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+button { font: inherit; border: 0; border-radius: 8px; padding: 8px 14px; background: var(--accent); color: var(--accent-text); cursor: pointer; }
+button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+button:disabled { opacity: .55; cursor: default; }
+main { padding: 8px 16px 32px; max-width: 720px; margin: 0 auto; }
+h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 6px; }
+ul { list-style: none; margin: 0; padding: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); }
+li:first-child { border-top: 0; }
+li.now { background: var(--now); }
+li.done { opacity: .55; }
+.song { flex: 1; min-width: 0; }
+.title { font-weight: 600; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.num { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 1.6em; text-align: right; }
+.hint { color: var(--muted); font-size: .9rem; padding: 8px 2px; }
+.empty { color: var(--muted); padding: 14px 12px; }
+#toast { position: fixed; left: 16px; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); max-width: 560px; margin: 0 auto; padding: 12px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: .95rem; opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s; pointer-events: none; }
+#toast.show { opacity: 1; transform: none; }
+#unpaired { display: none; padding: 24px 16px; text-align: center; color: var(--muted); }
+body.unpaired #unpaired { display: block; }
+body.unpaired main, body.unpaired #search { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>Encore</h1>
+    <span id="status" class="pill">…</span>
+    <button id="rescan" class="secondary" type="button">Rescan</button>
+  </div>
+  <input id="search" type="search" placeholder="Search title or artist" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+</header>
+
+<div id="unpaired">
+  <p><strong>This phone isn't paired yet.</strong></p>
+  <p>On the PC, scan the QR code in the Encore companion window, or open <code>http://localhost:47322/pair</code> there and scan it.</p>
+</div>
+
+<main>
+  <h2 id="results-head">Library</h2>
+  <ul id="results"><li class="empty">Type to search your songs.</li></ul>
+  <h2>Setlist</h2>
+  <ul id="setlist"><li class="empty">Loading…</li></ul>
+  <p class="hint">Queued songs go to the end of Clone Hero's setlist. Start the setlist in the game, or let a running setlist continue.</p>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+// Pairing: the QR code carries the token in the URL fragment (#pair=...), which never reaches
+// the server's logs. Store it and clean the address bar.
+(function takePairing() {
+  const m = location.hash.match(/pair=([0-9a-f]{32})/);
+  if (m) {
+    try { localStorage.setItem("encoreToken", m[1]); } catch (e) {}
+    window.__token = m[1];
+    history.replaceState(null, "", location.pathname);
+  }
+})();
+function token() {
+  if (window.__token) return window.__token;
+  try { return localStorage.getItem("encoreToken") || ""; } catch (e) { return ""; }
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: { "Authorization": "Bearer " + token() } };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  let res, data = {};
+  try {
+    res = await fetch("api/" + path, opts);
+  } catch (e) {
+    setStatus("bad", "PC offline");
+    throw { result: "network", message: "Can't reach the companion on the PC." };
+  }
+  try { data = await res.json(); } catch (e) {}
+  if (res.status === 401) {
+    document.body.classList.add("unpaired");
+    throw data;
+  }
+  document.body.classList.remove("unpaired");
+  if (!res.ok) throw Object.assign({ status: res.status }, data);
+  return data;
+}
+
+const friendly = {
+  encore_offline: "Clone Hero (with Encore) isn't running on the PC.",
+  not_in_song_list: "Open the song list in Clone Hero (or play a setlist), then try again.",
+  quickplay: "A single song is playing. Queue from the song list or during a setlist.",
+  practice: "Practice mode has no setlist.",
+  loading: "The next song is loading. Try again in a moment.",
+  timeout: "The game didn't answer in time. Try again.",
+  scanning: "A scan is already running.",
+  not_found: "That song isn't in the library anymore. Rescan and search again.",
+  not_ready: "Encore isn't ready yet. Try again in a moment.",
+};
+const explain = e => friendly[e && e.result] || (e && e.message) || "Something went wrong.";
+
+let toastTimer;
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+function setStatus(kind, text) {
+  const s = $("status");
+  s.className = "pill " + kind;
+  s.textContent = text;
+}
+
+function fmtLength(sec) {
+  if (sec == null) return "";
+  return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+}
+
+function songItem(song, extra) {
+  const li = document.createElement("li");
+  const info = document.createElement("div");
+  info.className = "song";
+  const title = document.createElement("div");
+  title.className = "title";
+  title.textContent = song.title || "(untitled)";
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = [song.artist, song.album, fmtLength(song.length)].filter(Boolean).join(" · ");
+  info.append(title, meta);
+  if (extra && extra.num) li.append(extra.num);
+  li.append(info);
+  if (extra && extra.button) li.append(extra.button);
+  return li;
+}
+
+// --- Search ---
+let searchSeq = 0, searchTimer;
+async function search() {
+  const q = $("search").value.trim();
+  const seq = ++searchSeq;
+  const list = $("results");
+  if (!q) {
+    $("results-head").textContent = "Library";
+    list.innerHTML = '<li class="empty">Type to search your songs.</li>';
+    return;
+  }
+  try {
+    const data = await api("GET", "library?q=" + encodeURIComponent(q) + "&limit=50");
+    if (seq !== searchSeq) return;
+    $("results-head").textContent = data.total > data.songs.length
+      ? `Showing ${data.songs.length} of ${data.total} matches` : `${data.total} match${data.total === 1 ? "" : "es"}`;
+    list.replaceChildren();
+    if (!data.songs.length) {
+      list.innerHTML = '<li class="empty">Not in the library.</li>';
+      return;
+    }
+    for (const song of data.songs) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Queue";
+      b.addEventListener("click", () => queue(song, b));
+      list.append(songItem(song, { button: b }));
+    }
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    list.replaceChildren();
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = explain(e);
+    list.append(li);
+  }
+}
+$("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(search, 250); });
+$("search").addEventListener("keydown", e => { if (e.key === "Enter") { clearTimeout(searchTimer); search(); e.target.blur(); } });
+
+async function queue(song, button) {
+  button.disabled = true;
+  try {
+    const r = await api("POST", "queue", { checksum: song.checksum });
+    button.textContent = "#" + r.position;
+    toast(`Queued “${song.title}” at position ${r.position}.`);
+    refreshSetlist();
+  } catch (e) {
+    button.disabled = false;
+    toast(explain(e));
+  }
+}
+
+// --- Setlist and status ---
+let setlistKey = "";
+async function refreshSetlist() {
+  try {
+    const data = await api("GET", "setlist");
+    const key = JSON.stringify(data);
+    if (key === setlistKey) return;
+    setlistKey = key;
+    const list = $("setlist");
+    list.replaceChildren();
+    if (!data.songs.length) {
+      list.innerHTML = '<li class="empty">The setlist is empty.</li>';
+      return;
+    }
+    data.songs.forEach((song, i) => {
+      const num = document.createElement("span");
+      num.className = "num";
+      num.textContent = i + 1;
+      const li = songItem(song, { num });
+      if (data.playing && i === data.index) li.className = "now";
+      else if (data.playing && i < data.index) li.className = "done";
+      list.append(li);
+    });
+  } catch (e) {
+    if (e && e.result === "unpaired") return;
+    setlistKey = "";
+    $("setlist").innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = explain(e);
+    $("setlist").append(li);
+  }
+}
+
+async function refreshStatus() {
+  try {
+    const s = await api("GET", "status");
+    if (s.scanning) setStatus("warn", "Scanning…");
+    else if (s.songList) setStatus("ok", "Song list");
+    else setStatus("ok", "Game running");
+  } catch (e) {
+    if (e && e.result === "encore_offline") setStatus("bad", "Game offline");
+    else if (e && e.result !== "network" && e.result !== "unpaired") setStatus("warn", "Busy");
+  }
+}
+
+$("rescan").addEventListener("click", async () => {
+  const b = $("rescan");
+  b.disabled = true;
+  try {
+    await api("POST", "rescan");
+    toast("Rescan started. New songs show up when it's done.");
+    refreshStatus();
+  } catch (e) {
+    toast(explain(e));
+  } finally {
+    setTimeout(() => { b.disabled = false; }, 1500);
+  }
+});
+
+function poll() {
+  if (document.visibilityState !== "visible") return;
+  refreshStatus();
+  refreshSetlist();
+}
+document.addEventListener("visibilitychange", poll);
+setInterval(poll, 4000);
+poll();
+</script>
+</body>
+</html>

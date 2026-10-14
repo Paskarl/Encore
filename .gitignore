@@ -15,3 +15,7 @@ carve/
 
 # Screenshots from tools/gamectl.ps1
 *.png
+
+# Companion build output
+companion/bin/
+companion/obj/

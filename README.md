@@ -172,5 +172,9 @@ With the environment variable `ENCORE_DUMP=1`, Encore also writes:
 - the fields and methods of all scan-related classes, to `encore.log`;
 - an address map of every game method, to `encore_methods.tsv`.
 
+`ENCORE_DUMP_FILTER` chooses which classes are dumped: a comma-separated list of class-name
+substrings (e.g. `SongSelect,Setlist,EndOfSong`), or `*` for every class. Dumping everything is how
+classes with obfuscated names are found by their field types.
+
 The analysis tools take that map as input. These files are derived from the game's code. Keep
 them local and don't commit or publish them.

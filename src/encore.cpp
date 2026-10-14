@@ -81,11 +81,30 @@ static void DumpClass(Il2CppClass* k)
     }
 }
 
+// Class name substrings to dump. ENCORE_DUMP_FILTER (comma-separated) replaces the default, which
+// covers the classes analysed for the rescan; "*" dumps every class (needed to find obfuscated
+// classes by their field types).
 static bool NameMatches(const char* name)
 {
-    static const char* kFilters[] = {"Scan", "SongSelect", "SongLibrary", "Rescan"};
-    for (const char* f : kFilters)
-        if (strstr(name, f))
+    static std::vector<std::string> filters = [] {
+        std::vector<std::string> list;
+        char buf[1024];
+        DWORD n = GetEnvironmentVariableA("ENCORE_DUMP_FILTER", buf, sizeof(buf));
+        std::string spec = (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : "Scan,SongSelect,SongLibrary,Rescan";
+        size_t start = 0;
+        while (start <= spec.size())
+        {
+            size_t end = spec.find(',', start);
+            if (end == std::string::npos)
+                end = spec.size();
+            if (end > start)
+                list.push_back(spec.substr(start, end - start));
+            start = end + 1;
+        }
+        return list;
+    }();
+    for (const std::string& f : filters)
+        if (f == "*" || strstr(name, f.c_str()))
             return true;
     return false;
 }

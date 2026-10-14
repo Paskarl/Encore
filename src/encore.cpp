@@ -2,7 +2,8 @@
 // Runs inside the game (loaded through the version.dll proxy), subclasses the Unity window
 // so all IL2CPP calls happen on the Unity main thread, and starts a song rescan when F5 is
 // pressed in the song list or another application sends POST /rescan to the loopback HTTP
-// listener (trigger_server.cpp). With ENCORE_DUMP=1 it also dumps the analysed classes.
+// listener (trigger_server.cpp). The listener can also queue songs into the game's setlist
+// (POST /queue). With ENCORE_DUMP=1 it also dumps the analysed classes.
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
@@ -442,6 +443,621 @@ static LRESULT QueryStatus()
     return r;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Song queue: the game's setlist is the queue (docs/ANALYSIS.md section 7).
+//
+//   - The song library is an obfuscated static class, found by its field types: a
+//     Dictionary<checksum, List<SongEntry>> plus several List<SongEntry>.
+//   - The setlist is three parallel static lists in that class, declared in a row:
+//     List<SongEntry> songs, List<int> song speeds, List<string> (one string per entry).
+//   - EndOfSong's "continue" reads the next song live from those lists, so appending to them
+//     while a setlist plays queues a song after the current setlist songs.
+//   - In the song list, SetlistMenu.Add(SongEntry, int, string) appends to the same lists and
+//     updates the setlist panel. SetlistMenu has three methods with that signature (obfuscator
+//     copies); the real one is called from far more places than the others.
+//   - EndOfSong.Start decides whether the finished song was the last setlist song (a bool, and
+//     the "setlist_end" instead of the "setlist" button panel). A song queued after that point
+//     would be dropped by "continue", so queueing on the end screen also undoes that decision.
+// ---------------------------------------------------------------------------------------------
+
+struct QueueRefs
+{
+    Il2CppClass* library = nullptr;
+    std::vector<FieldInfo*> songLists; // every static List<SongEntry> except the setlist
+    FieldInfo* setSongs = nullptr;     // setlist triple
+    FieldInfo* setSpeeds = nullptr;
+    FieldInfo* setStrings = nullptr;
+    const MethodInfo* checksumString = nullptr; // SongEntry getters
+    const MethodInfo* nameStripped = nullptr;
+    const MethodInfo* artistStripped = nullptr;
+    FieldInfo* gvInstance = nullptr; // GlobalVariables
+    FieldInfo* gvPractice = nullptr;
+    FieldInfo* gvPlayingSetlist = nullptr;
+    FieldInfo* gvSetlistIndex = nullptr;
+    FieldInfo* gvOriginalSpeed = nullptr;
+    FieldInfo* ssSetlistMenu = nullptr;           // SongSelect.setlistMenu
+    const MethodInfo* setlistAdd = nullptr;       // SetlistMenu.Add, null if ambiguous
+    Il2CppClass* endOfSong = nullptr;
+    Il2CppClass* gameManager = nullptr;
+    FieldInfo* eosIsLastSong = nullptr;           // null if not identified
+    FieldInfo* eosSetlistPanel = nullptr;
+    FieldInfo* eosSetlistEndPanel = nullptr;
+    const MethodInfo* activeSelf = nullptr;       // GameObject.get_activeSelf
+    bool ok = false;
+};
+static QueueRefs g_queue;
+
+static bool EndsWith(const std::string& s, const char* suffix)
+{
+    size_t n = strlen(suffix);
+    return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
+}
+
+static bool IsStatic(FieldInfo* f)
+{
+    return (il2cpp_field_get_flags(f) & kAttrStatic) != 0;
+}
+
+// Finds the song library class: only static fields, among them a Dictionary<_, List<SongEntry>>
+// and at least two List<SongEntry>. Must be unique in the image.
+static Il2CppClass* FindSongLibrary(const Il2CppImage* game)
+{
+    Il2CppClass* found = nullptr;
+    int matches = 0;
+    size_t n = il2cpp_image_get_class_count(game);
+    for (size_t i = 0; i < n; ++i)
+    {
+        Il2CppClass* k = il2cpp_image_get_class(game, i);
+        int lists = 0, fields = 0;
+        bool dict = false, allStatic = true;
+        void* it = nullptr;
+        while (FieldInfo* f = il2cpp_class_get_fields(k, &it))
+        {
+            ++fields;
+            if (!IsStatic(f))
+            {
+                allStatic = false;
+                break;
+            }
+            std::string t = TypeName(il2cpp_field_get_type(f));
+            if (t == "System.Collections.Generic.List<SongEntry>")
+                ++lists;
+            else if (t.rfind("System.Collections.Generic.Dictionary<", 0) == 0 &&
+                     EndsWith(t, ",System.Collections.Generic.List<SongEntry>>"))
+                dict = true;
+        }
+        if (allStatic && dict && lists >= 2)
+        {
+            found = k;
+            ++matches;
+        }
+    }
+    if (matches != 1)
+    {
+        Log("queue: song library class not unique (%d candidates)", matches);
+        return nullptr;
+    }
+    return found;
+}
+
+// Identifies SetlistMenu.Add(SongEntry, int, string) among its obfuscator copies by outside
+// callers (8 for the real one in v1.1.0.6142, 1 and 0 for the copies). Accepted only if one
+// candidate has clearly the most: at least 3, and at least twice as many as any other.
+static const MethodInfo* IdentifySetlistAdd(Il2CppClass* setlistMenu)
+{
+    std::vector<const MethodInfo*> candidates;
+    void* it = nullptr;
+    while (const MethodInfo* m = il2cpp_class_get_methods(setlistMenu, &it))
+    {
+        uint32_t iflags = 0;
+        if ((il2cpp_method_get_flags(m, &iflags) & kAttrStatic) || il2cpp_method_get_param_count(m) != 3 ||
+            !il2cpp_method_pointer(m))
+            continue;
+        if (TypeName(il2cpp_method_get_return_type(m)) == "System.Void" &&
+            TypeName(il2cpp_method_get_param(m, 0)) == "SongEntry" &&
+            TypeName(il2cpp_method_get_param(m, 1)) == "System.Int32" &&
+            TypeName(il2cpp_method_get_param(m, 2)) == "System.String")
+            candidates.push_back(m);
+    }
+    std::vector<uintptr_t> targets, own;
+    for (const MethodInfo* m : candidates)
+        targets.push_back(reinterpret_cast<uintptr_t>(il2cpp_method_pointer(m)));
+    CollectMethodBodies(setlistMenu, own);
+    std::vector<int> counts = CountExternalCallers(targets, own);
+    int best = -1, bestCount = 0, second = 0;
+    for (size_t i = 0; i < candidates.size(); ++i)
+    {
+        Log("  SetlistMenu.Add candidate RVA=0x%llx external callers=%d",
+            static_cast<unsigned long long>(Rva(il2cpp_method_pointer(candidates[i]))), counts[i]);
+        if (counts[i] > bestCount)
+        {
+            second = bestCount;
+            bestCount = counts[i];
+            best = static_cast<int>(i);
+        }
+        else if (counts[i] > second)
+            second = counts[i];
+    }
+    if (best < 0 || bestCount < 3 || bestCount < 2 * second)
+    {
+        Log("SetlistMenu.Add ambiguous (best %d callers, next %d): queueing in the song list appends to the "
+            "setlist lists without refreshing the setlist panel", bestCount, second);
+        return nullptr;
+    }
+    return candidates[best];
+}
+
+// EndOfSong's "this was the last setlist song" flag: its first own bool field that is not an
+// auto-property backing field (offset 0xa1 in v1.1.0.6142). Only ever written when it is true
+// and the "setlist_end" panel is showing, which confirms the identification at runtime.
+static FieldInfo* FindIsLastSong(Il2CppClass* endOfSong)
+{
+    void* it = nullptr;
+    while (FieldInfo* f = il2cpp_class_get_fields(endOfSong, &it))
+    {
+        if (IsStatic(f) || TypeName(il2cpp_field_get_type(f)) != "System.Boolean")
+            continue;
+        if (strstr(il2cpp_field_get_name(f), "k__BackingField"))
+            continue;
+        return f;
+    }
+    return nullptr;
+}
+
+static bool ResolveQueueRefs(const Il2CppImage* game)
+{
+    QueueRefs& q = g_queue;
+    q.library = FindSongLibrary(game);
+    if (q.library)
+    {
+        std::vector<FieldInfo*> fields;
+        void* it = nullptr;
+        while (FieldInfo* f = il2cpp_class_get_fields(q.library, &it))
+            fields.push_back(f);
+        int triples = 0;
+        for (size_t i = 0; i + 2 < fields.size(); ++i)
+        {
+            if (TypeName(il2cpp_field_get_type(fields[i])) == "System.Collections.Generic.List<SongEntry>" &&
+                TypeName(il2cpp_field_get_type(fields[i + 1])) == "System.Collections.Generic.List<System.Int32>" &&
+                TypeName(il2cpp_field_get_type(fields[i + 2])) == "System.Collections.Generic.List<System.String>")
+            {
+                ++triples;
+                q.setSongs = fields[i];
+                q.setSpeeds = fields[i + 1];
+                q.setStrings = fields[i + 2];
+            }
+        }
+        if (triples != 1)
+        {
+            Log("queue: setlist lists not unique (%d candidates)", triples);
+            q.setSongs = q.setSpeeds = q.setStrings = nullptr;
+        }
+        for (FieldInfo* f : fields)
+            if (f != q.setSongs && TypeName(il2cpp_field_get_type(f)) == "System.Collections.Generic.List<SongEntry>")
+                q.songLists.push_back(f);
+    }
+    Il2CppClass* songEntry = il2cpp_class_from_name(game, "", "SongEntry");
+    if (songEntry)
+    {
+        q.checksumString = il2cpp_class_get_method_from_name(songEntry, "get_ChecksumString", 0);
+        q.nameStripped = il2cpp_class_get_method_from_name(songEntry, "get_Name_StrippedTags", 0);
+        q.artistStripped = il2cpp_class_get_method_from_name(songEntry, "get_Artist_StrippedTags", 0);
+    }
+    if (Il2CppClass* gv = il2cpp_class_from_name(game, "", "GlobalVariables"))
+    {
+        q.gvInstance = il2cpp_class_get_field_from_name(gv, "instance");
+        q.gvPractice = il2cpp_class_get_field_from_name(gv, "isPracticeEnabled");
+        q.gvPlayingSetlist = il2cpp_class_get_field_from_name(gv, "isPlayingSetlist");
+        q.gvSetlistIndex = il2cpp_class_get_field_from_name(gv, "setlistIndex");
+        q.gvOriginalSpeed = il2cpp_class_get_field_from_name(gv, "originalSongSpeed");
+    }
+    q.ssSetlistMenu = il2cpp_class_get_field_from_name(g_refs.songSelect, "setlistMenu");
+    if (Il2CppClass* setlistMenu = il2cpp_class_from_name(game, "", "SetlistMenu"))
+        q.setlistAdd = IdentifySetlistAdd(setlistMenu);
+    q.endOfSong = il2cpp_class_from_name(game, "", "EndOfSong");
+    q.gameManager = il2cpp_class_from_name(game, "", "GameManager");
+    if (q.endOfSong)
+    {
+        q.eosIsLastSong = FindIsLastSong(q.endOfSong);
+        q.eosSetlistPanel = il2cpp_class_get_field_from_name(q.endOfSong, "setlist");
+        q.eosSetlistEndPanel = il2cpp_class_get_field_from_name(q.endOfSong, "setlist_end");
+    }
+    const Il2CppImage* core = FindImage("UnityEngine.CoreModule.dll");
+    if (Il2CppClass* gameObject = core ? il2cpp_class_from_name(core, "UnityEngine", "GameObject") : nullptr)
+        q.activeSelf = il2cpp_class_get_method_from_name(gameObject, "get_activeSelf", 0);
+
+    q.ok = q.library && q.setSongs && !q.songLists.empty() && q.checksumString && q.nameStripped &&
+           q.artistStripped && q.gvInstance && q.gvPractice && q.gvPlayingSetlist && q.gvSetlistIndex &&
+           q.gvOriginalSpeed && q.ssSetlistMenu && q.endOfSong && q.gameManager;
+    Log("queue resolve: library=%s setlist=%s/%s/%s (static offsets 0x%zx/0x%zx/0x%zx) songLists=%zu "
+        "SetlistMenu.Add=%s isLastSong=%s (off 0x%zx) setlist panels=%p/%p -> %s",
+        q.library ? il2cpp_class_get_name(q.library) : "-", q.setSongs ? il2cpp_field_get_name(q.setSongs) : "-",
+        q.setSpeeds ? il2cpp_field_get_name(q.setSpeeds) : "-", q.setStrings ? il2cpp_field_get_name(q.setStrings) : "-",
+        q.setSongs ? il2cpp_field_get_offset(q.setSongs) : 0, q.setSpeeds ? il2cpp_field_get_offset(q.setSpeeds) : 0,
+        q.setStrings ? il2cpp_field_get_offset(q.setStrings) : 0, q.songLists.size(),
+        q.setlistAdd ? "ok" : "not identified", q.eosIsLastSong ? "ok" : "not identified",
+        q.eosIsLastSong ? il2cpp_field_get_offset(q.eosIsLastSong) : 0, q.eosSetlistPanel, q.eosSetlistEndPanel,
+        q.ok ? "ok" : "FAILED (game structure changed?)");
+    return q.ok;
+}
+
+// --- Managed object helpers --------------------------------------------------------------------
+
+// System.Collections.Generic.List<T>: _items at 0x10, _size at 0x18. Arrays: elements at 0x20.
+static int ListCount(Il2CppObject* list)
+{
+    return list ? *reinterpret_cast<int*>(reinterpret_cast<char*>(list) + 0x18) : 0;
+}
+
+template <typename T>
+static T ListItem(Il2CppObject* list, int i)
+{
+    char* items = *reinterpret_cast<char**>(reinterpret_cast<char*>(list) + 0x10);
+    return reinterpret_cast<T*>(items + 0x20)[i];
+}
+
+// Appends through List<T>.Add, so the list grows and bumps its version like game code would.
+static bool ListAdd(Il2CppObject* list, void* arg)
+{
+    const MethodInfo* add = il2cpp_class_get_method_from_name(il2cpp_object_get_class(list), "Add", 1);
+    if (!add)
+        return false;
+    void* args[] = {arg};
+    Il2CppObject* exc = nullptr;
+    il2cpp_runtime_invoke(add, list, args, &exc);
+    return exc == nullptr;
+}
+
+static Il2CppObject* StaticObject(FieldInfo* f)
+{
+    Il2CppObject* v = nullptr;
+    il2cpp_field_static_get_value(f, &v);
+    return v;
+}
+
+// System.String: length at 0x10, UTF-16 characters at 0x14.
+static std::wstring WideString(Il2CppString* s)
+{
+    if (!s)
+        return L"";
+    int len = *reinterpret_cast<int*>(reinterpret_cast<char*>(s) + 0x10);
+    return std::wstring(reinterpret_cast<wchar_t*>(reinterpret_cast<char*>(s) + 0x14), len);
+}
+
+static std::string Utf8(const std::wstring& w)
+{
+    if (w.empty())
+        return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+static std::wstring Wide(const std::string& s)
+{
+    if (s.empty())
+        return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &w[0], n);
+    return w;
+}
+
+static std::wstring CallString(const MethodInfo* m, Il2CppObject* obj)
+{
+    return WideString(reinterpret_cast<Il2CppString*>(Invoke(m, obj, nullptr)));
+}
+
+static bool SameText(const std::wstring& a, const std::wstring& b)
+{
+    return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(), static_cast<int>(b.size()), TRUE) ==
+           CSTR_EQUAL;
+}
+
+static std::string JsonString(const std::string& s)
+{
+    std::string out = "\"";
+    for (unsigned char c : s)
+    {
+        if (c == '"' || c == '\\')
+        {
+            out += '\\';
+            out += static_cast<char>(c);
+        }
+        else if (c < 0x20)
+        {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "\\u%04x", c);
+            out += buf;
+        }
+        else
+            out += static_cast<char>(c);
+    }
+    return out + "\"";
+}
+
+static std::string SongJson(Il2CppObject* song)
+{
+    return "{\"title\":" + JsonString(Utf8(CallString(g_queue.nameStripped, song))) +
+           ",\"artist\":" + JsonString(Utf8(CallString(g_queue.artistStripped, song))) +
+           ",\"checksum\":" + JsonString(Utf8(CallString(g_queue.checksumString, song))) + "}";
+}
+
+static std::string SongLabel(Il2CppObject* song)
+{
+    if (!song)
+        return "(null)";
+    return Utf8(CallString(g_queue.artistStripped, song)) + " - " + Utf8(CallString(g_queue.nameStripped, song)) +
+           " [" + Utf8(CallString(g_queue.checksumString, song)) + "]";
+}
+
+static Il2CppObject* GlobalVars()
+{
+    return g_queue.gvInstance ? StaticObject(g_queue.gvInstance) : nullptr;
+}
+
+template <typename T>
+static T GetField(Il2CppObject* obj, FieldInfo* f)
+{
+    T v{};
+    il2cpp_field_get_value(obj, f, &v);
+    return v;
+}
+
+// --- Diagnostics -------------------------------------------------------------------------------
+
+// Logs the sizes of the library's song lists and the full setlist triple. Answers the open
+// questions of ANALYSIS.md section 7 (which list holds all songs, what the strings contain).
+static void LogLibraryState(const char* reason)
+{
+    QueueRefs& q = g_queue;
+    Log("library state (%s):", reason);
+    for (FieldInfo* f : q.songLists)
+        Log("  List<SongEntry> %s (static off 0x%zx): %d songs", il2cpp_field_get_name(f), il2cpp_field_get_offset(f),
+            ListCount(StaticObject(f)));
+    if (Il2CppObject* gv = GlobalVars())
+        Log("  GlobalVariables: isPlayingSetlist=%d setlistIndex=%d originalSongSpeed=%d isPracticeEnabled=%d",
+            GetField<bool>(gv, q.gvPlayingSetlist), GetField<int>(gv, q.gvSetlistIndex),
+            GetField<int>(gv, q.gvOriginalSpeed), GetField<bool>(gv, q.gvPractice));
+    Il2CppObject* songs = StaticObject(q.setSongs);
+    Il2CppObject* speeds = StaticObject(q.setSpeeds);
+    Il2CppObject* strings = StaticObject(q.setStrings);
+    int ns = ListCount(songs), nv = ListCount(speeds), nt = ListCount(strings);
+    Log("  setlist: %d songs, %d speeds, %d strings", ns, nv, nt);
+    for (int i = 0; i < ns; ++i)
+    {
+        std::string str = "(missing)";
+        if (i < nt)
+        {
+            Il2CppString* s = ListItem<Il2CppString*>(strings, i);
+            str = s ? "\"" + Utf8(WideString(s)) + "\" (len " + std::to_string(WideString(s).size()) + ")" : "null";
+        }
+        Log("    [%d] %s speed=%d string=%s", i, SongLabel(ListItem<Il2CppObject*>(songs, i)).c_str(),
+            i < nv ? ListItem<int>(speeds, i) : -1, str.c_str());
+    }
+}
+
+// --- Requests ----------------------------------------------------------------------------------
+
+static void Reply(JsonRequest* req, int status, const std::string& body)
+{
+    req->httpStatus = status;
+    req->body = body;
+}
+
+static void ReplyResult(JsonRequest* req, int status, const char* result, const char* message)
+{
+    Reply(req, status, std::string("{\"result\":\"") + result + "\",\"message\":" + JsonString(message) + "}");
+}
+
+// GET /setlist
+static void HandleSetlist(JsonRequest* req)
+{
+    QueueRefs& q = g_queue;
+    if (!g_initDone || !q.ok)
+        return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
+    LogLibraryState("GET /setlist");
+    Il2CppObject* gv = GlobalVars();
+    Il2CppObject* songs = StaticObject(q.setSongs);
+    Il2CppObject* speeds = StaticObject(q.setSpeeds);
+    int n = ListCount(songs), nv = ListCount(speeds);
+    std::string body = std::string("{\"playing\":") + (gv && GetField<bool>(gv, q.gvPlayingSetlist) ? "true" : "false") +
+                       ",\"index\":" + std::to_string(gv ? GetField<int>(gv, q.gvSetlistIndex) : -1) + ",\"songs\":[";
+    for (int i = 0; i < n; ++i)
+    {
+        std::string song = SongJson(ListItem<Il2CppObject*>(songs, i));
+        song.insert(song.size() - 1, ",\"speed\":" + std::to_string(i < nv ? ListItem<int>(speeds, i) : -1));
+        body += (i ? "," : "") + song;
+    }
+    Reply(req, 200, body + "]}");
+}
+
+// Looks up a song in the largest static List<SongEntry> of the library (all songs).
+static Il2CppObject* FindSong(const JsonRequest* req, int& matches)
+{
+    Il2CppObject* all = nullptr;
+    for (FieldInfo* f : g_queue.songLists)
+    {
+        Il2CppObject* list = StaticObject(f);
+        if (ListCount(list) > ListCount(all))
+            all = list;
+    }
+    matches = 0;
+    Il2CppObject* found = nullptr;
+    std::wstring checksum = Wide(req->checksum), title = Wide(req->title), artist = Wide(req->artist);
+    int n = ListCount(all);
+    for (int i = 0; i < n; ++i)
+    {
+        Il2CppObject* song = ListItem<Il2CppObject*>(all, i);
+        if (!song)
+            continue;
+        bool hit;
+        if (!checksum.empty())
+            hit = SameText(CallString(g_queue.checksumString, song), checksum);
+        else
+            hit = SameText(CallString(g_queue.nameStripped, song), title) &&
+                  (artist.empty() || SameText(CallString(g_queue.artistStripped, song), artist));
+        if (hit)
+        {
+            if (!found)
+                found = song;
+            ++matches;
+        }
+    }
+    return found;
+}
+
+static bool GameObjectActive(Il2CppObject* go)
+{
+    if (!go || !g_queue.activeSelf)
+        return false;
+    Il2CppObject* boxed = Invoke(g_queue.activeSelf, go, nullptr);
+    return boxed && *static_cast<bool*>(il2cpp_object_unbox(boxed));
+}
+
+// If the end-of-song screen already decided that the setlist is over, but songs were queued
+// since, reverts that decision so "continue" plays the next song.
+static void ReopenEndOfSongSetlist(int setlistIndex, int count)
+{
+    QueueRefs& q = g_queue;
+    if (!q.eosIsLastSong || !q.eosSetlistPanel || !q.eosSetlistEndPanel || setlistIndex >= count - 1)
+        return;
+    Il2CppObject* eos = FindActiveInstance(q.endOfSong);
+    if (!eos)
+        return;
+    Il2CppObject* endPanel = GetField<Il2CppObject*>(eos, q.eosSetlistEndPanel);
+    Il2CppObject* nextPanel = GetField<Il2CppObject*>(eos, q.eosSetlistPanel);
+    bool isLast = GetField<bool>(eos, q.eosIsLastSong);
+    if (!isLast || !GameObjectActive(endPanel))
+    {
+        Log("queue: end screen open, isLastSong=%d setlist_end active=%d, nothing to undo", isLast,
+            GameObjectActive(endPanel));
+        return;
+    }
+    bool off = false, on = true;
+    il2cpp_field_set_value(eos, q.eosIsLastSong, &off);
+    void* offArgs[] = {&off};
+    void* onArgs[] = {&on};
+    Invoke(g_refs.setActive, endPanel, offArgs);
+    if (nextPanel)
+        Invoke(g_refs.setActive, nextPanel, onArgs);
+    Log("queue: end screen had ended the setlist; switched it back to \"continue\"");
+}
+
+// POST /queue
+static void HandleQueue(JsonRequest* req)
+{
+    QueueRefs& q = g_queue;
+    if (!g_initDone || !g_refs.ok || !q.ok)
+        return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
+    Il2CppObject* gv = GlobalVars();
+    if (!gv)
+        return ReplyResult(req, 503, "not_ready", "GlobalVariables not available yet");
+    if (GetField<bool>(gv, q.gvPractice))
+    {
+        Log("queue refused: practice mode");
+        return ReplyResult(req, 409, "practice", "practice mode has no setlist");
+    }
+
+    Il2CppObject* songSelect = FindActiveInstance(g_refs.songSelect);
+    bool playingSetlist = GetField<bool>(gv, q.gvPlayingSetlist);
+    bool inGame = FindActiveInstance(q.gameManager) || FindActiveInstance(q.endOfSong);
+    Il2CppObject* songs = StaticObject(q.setSongs);
+    Il2CppObject* speeds = StaticObject(q.setSpeeds);
+    Il2CppObject* strings = StaticObject(q.setStrings);
+    if (!songs || !speeds || !strings)
+        return ReplyResult(req, 500, "failed", "setlist lists are null, see encore.log");
+    int count = ListCount(songs);
+    if (ListCount(speeds) != count || ListCount(strings) != count)
+    {
+        Log("queue refused: setlist lists out of sync (%d/%d/%d)", count, ListCount(speeds), ListCount(strings));
+        return ReplyResult(req, 500, "failed", "setlist lists out of sync, see encore.log");
+    }
+    const char* mode;
+    if (songSelect)
+        mode = "song_list";
+    else if (inGame && playingSetlist)
+        mode = "setlist_running";
+    else if (inGame)
+    {
+        Log("queue refused: quickplay (no setlist running)");
+        return ReplyResult(req, 409, "quickplay",
+                           "a single song is playing, not a setlist; queue from the song list or during a setlist");
+    }
+    else if (playingSetlist && count > 0)
+    {
+        // Between songs of a setlist no scene object is active yet.
+        Log("queue refused: setlist scene is loading");
+        return ReplyResult(req, 503, "loading", "the next setlist song is loading, try again in a moment");
+    }
+    else
+    {
+        Log("queue refused: not in the song list or a setlist");
+        return ReplyResult(req, 409, "not_in_song_list", "open the song list (or play a setlist) and try again");
+    }
+
+    int matches = 0;
+    Il2CppObject* song = FindSong(req, matches);
+    if (!song)
+    {
+        Log("queue: no song for checksum=\"%s\" title=\"%s\" artist=\"%s\"", req->checksum.c_str(),
+            req->title.c_str(), req->artist.c_str());
+        return ReplyResult(req, 404, "not_found", "no song with that checksum/title in the library (rescan first?)");
+    }
+
+    // The game passes the song speed setting; the player's chosen speed is kept in
+    // GlobalVariables.originalSongSpeed while a setlist overrides the setting per song.
+    int speed = req->speed;
+    if (speed <= 0)
+        speed = GetField<int>(gv, q.gvOriginalSpeed);
+    if (speed <= 0)
+        speed = 100;
+    // Reuse the string object of an existing entry so ours matches what the game stores; an empty
+    // setlist gets an empty string (to be confirmed by the runtime check).
+    Il2CppObject* str = count > 0 ? ListItem<Il2CppObject*>(strings, count - 1)
+                                  : reinterpret_cast<Il2CppObject*>(il2cpp_string_new(""));
+
+    if (songSelect && q.setlistAdd)
+    {
+        Il2CppObject* menu = GetField<Il2CppObject*>(songSelect, q.ssSetlistMenu);
+        if (!menu)
+            return ReplyResult(req, 500, "failed", "SongSelect.setlistMenu is null, see encore.log");
+        void* args[] = {song, &speed, str};
+        Invoke(q.setlistAdd, menu, args);
+        mode = "song_list";
+    }
+    else
+    {
+        // In a running setlist SetlistMenu doesn't exist; append to the three lists, songs last
+        // so a reader never sees a song without its speed and string.
+        if (!ListAdd(speeds, &speed) || !ListAdd(strings, str) || !ListAdd(songs, song))
+        {
+            Log("queue: List.Add failed, lists now %d/%d/%d", ListCount(songs), ListCount(speeds), ListCount(strings));
+            return ReplyResult(req, 500, "failed", "appending to the setlist failed, see encore.log");
+        }
+        if (songSelect)
+            mode = "song_list_lists"; // SetlistMenu.Add not identified: panel not refreshed
+    }
+    int newCount = ListCount(songs);
+    if (newCount != count + 1 || ListCount(speeds) != newCount || ListCount(strings) != newCount)
+    {
+        Log("queue: unexpected setlist sizes after adding: %d/%d/%d (was %d)", newCount, ListCount(speeds),
+            ListCount(strings), count);
+        return ReplyResult(req, 500, "failed", "setlist did not grow as expected, see encore.log");
+    }
+    int setlistIndex = GetField<int>(gv, q.gvSetlistIndex);
+    if (strcmp(mode, "setlist_running") == 0)
+        ReopenEndOfSongSetlist(setlistIndex, newCount);
+    Log("queued (%s, %d matches): %s speed=%d -> setlist position %d of %d", mode, matches, SongLabel(song).c_str(),
+        speed, newCount, newCount);
+    LogLibraryState("after queue");
+    Reply(req, 200,
+          std::string("{\"result\":\"queued\",\"mode\":\"") + mode + "\",\"song\":" + SongJson(song) +
+              ",\"speed\":" + std::to_string(speed) + ",\"position\":" + std::to_string(newCount) +
+              ",\"count\":" + std::to_string(newCount) + ",\"matches\":" + std::to_string(matches) + "}");
+}
+
 static bool DumpRequested()
 {
     wchar_t v[8];
@@ -486,7 +1102,14 @@ static void OnMainThreadInit(HWND hwnd)
         Log("dump done");
     }
     if (ResolveGameRefs(game))
+    {
         Log("ready: press F5 in the song list (or POST /rescan) to rescan songs");
+        if (ResolveQueueRefs(game))
+        {
+            Log("queue ready: POST /queue adds a song to the setlist, GET /setlist shows it");
+            LogLibraryState("startup");
+        }
+    }
 }
 
 static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -509,6 +1132,19 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return TriggerRescanFromSongList("http");
         if (wp == kCmdStatus)
             return QueryStatus();
+        if (wp == kCmdQueue || wp == kCmdSetlist)
+        {
+            // Returning 1 tells the listener that this side took (and released) its reference.
+            auto* req = reinterpret_cast<JsonRequest*>(lp);
+            if (wp == kCmdQueue)
+                HandleQueue(req);
+            else
+                HandleSetlist(req);
+            if (req->httpStatus == 0)
+                ReplyResult(req, 500, "failed", "request not handled, see encore.log");
+            ReleaseRequest(req);
+            return 1;
+        }
         return 0;
     }
     // Bit 30 of lParam = key was already down (auto-repeat).

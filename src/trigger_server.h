@@ -1,8 +1,10 @@
 // Encore trigger interface: a loopback-only HTTP listener that lets other applications start a
-// song rescan. The listener thread never touches IL2CPP; it forwards each request to the Unity
-// window with SendMessageTimeout, so the window procedure handles it on the main thread.
+// song rescan and queue songs. The listener thread never touches IL2CPP; it forwards each request
+// to the Unity window with SendMessageTimeout, so the window procedure handles it on the main
+// thread.
 #pragma once
 #include <windows.h>
+#include <string>
 
 void Log(const char* fmt, ...);
 
@@ -11,6 +13,8 @@ enum TriggerCommand : WPARAM
 {
     kCmdRescan = 1,
     kCmdStatus = 2,
+    kCmdQueue = 3,   // lParam = JsonRequest*
+    kCmdSetlist = 4, // lParam = JsonRequest*
 };
 
 // Result of kCmdRescan, returned by the window procedure.
@@ -31,6 +35,26 @@ enum StatusFlags : LRESULT
     kStatusScanning = 0x2,
     kStatusSongList = 0x4,
 };
+
+// A request whose answer is a JSON body built on the main thread (kCmdQueue, kCmdSetlist).
+// Both threads hold a reference: if SendMessageTimeout gives up, the window procedure may still
+// handle the message later, so the request must outlive the listener's wait.
+struct JsonRequest
+{
+    LONG refs = 2;
+    // Input (kCmdQueue). Empty / -1 when not given.
+    std::string checksum, title, artist;
+    int speed = -1;
+    // Output, filled on the main thread. httpStatus 0 = not handled.
+    int httpStatus = 0;
+    std::string body;
+};
+
+inline void ReleaseRequest(JsonRequest* r)
+{
+    if (InterlockedDecrement(&r->refs) == 0)
+        delete r;
+}
 
 // Starts the listener thread on 127.0.0.1:port.
 void StartTriggerServer(HWND unityWnd, UINT triggerMsg, unsigned short port);

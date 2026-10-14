@@ -37,6 +37,8 @@ IL2CPP game and calls game code through the IL2CPP runtime API.
 - Never commit dumps, slices or decompiled output (`*.tsv`, `encore.log`, `*_slice*.dll`). They are
   derived from the game's code; `.gitignore` covers them.
 - REA can't analyse the full 70 MB `GameAssembly.dll` (Ghidra startup timeout). Use
-  `tools/make-slice.ps1` and open the slice instead.
+  `tools/make-slice.ps1` and open the slice instead. To see who uses a class's statics, run
+  `tools/find-refs.ps1` on its class-pointer global (the `DAT_183…` value in pseudocode); for who
+  calls a method, `tools/find-callers.ps1`. `ENCORE_DUMP_FILTER=*` dumps every class.
 - PowerShell 5.1: pass commit messages with `git commit -F <file>`, because quotes in `-m` get
   mangled. Write files without a BOM.

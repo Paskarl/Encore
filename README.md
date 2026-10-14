@@ -39,7 +39,8 @@ Encore is meant to become the bridge between Clone Hero and external tools:
 | Survives game updates (no hard-coded addresses) | **Working**, see [Update resistance](#update-resistance) |
 | Trigger interface for other applications (local HTTP: `POST /rescan`, `GET /status`) | **Working**, see [Trigger from other applications](#trigger-from-other-applications) |
 | Bridge / folder-watcher integration | **Working** as a song folder watcher that works with any downloader, see [Rescan automatically after downloads](#rescan-automatically-after-downloads) |
-| Companion web app: search and download | Planned |
+| Companion web app, step 1: search your library from a phone, queue songs, rescan (`GET /library`) | **Prototype working**, see [Companion web app](#companion-web-app) |
+| Companion web app, step 2: find and download missing charts | Planned |
 | Remote song queueing (`POST /queue`, `GET /setlist`) | **Prototype working**: queues into the game's setlist from the song list and while a setlist plays, see [Queue songs](#queue-songs) |
 
 Encore does two things:
@@ -88,6 +89,7 @@ so only programs on the same PC can reach it.
 | | `503 {"result":"not_ready"}` / `{"result":"timeout"}`: Encore isn't initialised, or the game didn't answer within 3 s (e.g. while loading). Try again. |
 | `GET /status` | `200 {"ready":true,"scanning":false,"songList":true}` |
 | `POST /queue`, `GET /setlist` | Song queue, see [Queue songs](#queue-songs). |
+| `GET /library?q=…&limit=…` | Library search, see [Search the library](#search-the-library). |
 
 An external rescan behaves exactly like F5: it only runs while the song list is open. In other
 menus or during a song it is refused with `not_in_song_list`, because a scan during gameplay or
@@ -151,6 +153,66 @@ Example client ([`tools/encore-queue.ps1`](tools/encore-queue.ps1)):
 
 Or with curl: `curl -X POST "http://127.0.0.1:47321/queue?checksum=0F57BDA89A2B6A2A91FA8A3938419B2F"`.
 
+### Search the library
+
+`GET /library?q=<text>&limit=<n>` searches the songs Clone Hero has loaded. Every word of `q` must
+appear in the title or the artist (case-insensitive, without formatting tags). Exact and prefix
+title matches come first, then artist matches, then the rest, each group sorted by artist and
+title. An empty `q` lists the library from the start. `limit` defaults to 50, maximum 200.
+
+```json
+{"query":"moses","total":1,"library":1649,"songs":[{"title":"Shadow Moses","artist":"Bring Me The Horizon",
+ "album":"Sempiternal","checksum":"9614F4EFD22D895A94C20637B69552E9","length":247}]}
+```
+
+`total` is the number of matches (more than `songs` when the limit cut them off), `library` the
+number of songs, `length` the song length in seconds (`null` if unknown). Queue a result with
+`POST /queue?checksum=…`. Encore indexes the library on the first search and again whenever the
+song list changes (after a rescan); a search then takes a few milliseconds.
+
+Or with curl: `curl "http://127.0.0.1:47321/library?q=bring%20horizon&limit=5"`.
+
+### Companion web app
+
+The companion ([`companion/`](companion/)) is a small web server on the PC that lets phones on the
+same Wi-Fi search the library, queue songs and start a rescan. Encore itself stays reachable only
+from the PC; the companion forwards a fixed set of requests to it.
+
+Requires the .NET 8 SDK. Start it in a console window and leave it running during a session:
+
+```powershell
+dotnet run -c Release --project companion
+```
+
+1. The console shows a QR code and the address `http://<PC address>:47322/#pair=<code>`. Scan it
+   with the phone's camera. The page opens and remembers the pairing, so later you can just open
+   `http://<PC address>:47322/` (add it to the home screen).
+   If the QR code in the console doesn't scan, open `http://localhost:47322/pair` on the PC; it
+   shows the same code larger. On the first start that page opens by itself.
+2. Search for a song and tap **Queue**. It goes to the end of the setlist, like `POST /queue`:
+   from the song list (start the setlist as usual) or while a setlist is playing.
+3. The page shows the setlist (the current song highlighted), whether the game is running, and a
+   **Rescan** button.
+
+**Firewall:** the first start makes Windows ask whether to allow the app on networks. Allow it for
+**private networks** only. If the phone can't load the page, check that the Wi-Fi is set to
+*Private* in Windows and that the prompt wasn't dismissed (*Windows Defender Firewall → Allow an
+app*).
+
+**Security:**
+- Every request except the empty page needs the pairing code, a random 128-bit token stored in
+  `%LOCALAPPDATA%\Encore\companion-token.txt`. Requests without it are refused (`401 unpaired`).
+- The code is shown only on the PC: in the console and on the `/pair` page, which answers only to
+  a browser on the PC itself.
+- Requests from addresses outside private networks (anything but `10.x`, `172.16–31.x`,
+  `192.168.x`, link-local and loopback) are refused, so the companion isn't usable from the
+  internet even through a port forward. Don't forward the port.
+- Anyone with the code can queue songs and start rescans while the companion runs, nothing more.
+  To revoke all paired phones, start it once with `--new-token` and scan the new code.
+
+Options: `--port <n>` (default 47322), `--encore-port <n>` (default 47321, or `ENCORE_PORT`),
+`--new-token`.
+
 ### Rescan automatically after downloads
 
 [`tools/encore-watch.ps1`](tools/encore-watch.ps1) watches your song folders and asks Encore for a
@@ -188,7 +250,9 @@ Encore writes `encore.log` next to `Clone Hero.exe`:
 | `queue resolve: … -> ok` / `queue ready: …` | The song library, setlist lists and `SetlistMenu.Add` were found; `/queue` works. |
 | `queue resolve: … -> FAILED` / `… not unique` | The game changed so that the setlist can't be found safely. `/queue` answers `not_ready`; rescans still work. |
 | `SetlistMenu.Add ambiguous …` | Queueing from the song list still works, but the setlist panel only shows the song after it is reopened. |
-| `library state (…)` | Sizes of the library's song lists and every setlist entry (song, speed, string). Written at startup, on `GET /setlist` and after each queued song. |
+| `library state (…)` | Sizes of the library's song lists and every setlist entry (song, speed, string). Written at startup, on `GET /setlist` when the setlist changed, and after each queued song. |
+| `library: indexed N songs for search` | `GET /library` read the song list (first search, or the list changed). |
+| `queue: … song length not available` | The song length field wasn't found; `/library` answers `"length":null`, everything else works. |
 | `queued (mode, N matches): …` / `queue refused: …` | Result of a `/queue` request. |
 | `queue: end screen had ended the setlist; switched it back to "continue"` | A song was queued on the last song's end screen. |
 
@@ -211,13 +275,17 @@ In every failure case Encore does nothing, and the game keeps running normally.
 - `SetlistMenu.Add` has two obfuscator copies; the real one is called from far more places (8 vs
   1 and 0), which Encore checks with the same call-site scan. `GlobalVariables`, `SongSelect`,
   `EndOfSong` and their fields are found by name.
+- The song length field of `SongEntry` has an obfuscated name. `get_HasLength` is `length > 0`;
+  Encore decodes its first instruction (`cmp dword [rcx+offset], 0`) and takes the `int` field at
+  that offset. If the instruction looks different, `/library` reports no lengths.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `src/encore.cpp` | Startup, main-thread hook, StartScan detection, rescan, status and song queue on the main thread |
-| `src/trigger_server.cpp`, `src/trigger_server.h` | Loopback HTTP listener (`/rescan`, `/status`, `/queue`, `/setlist`) |
+| `src/trigger_server.cpp`, `src/trigger_server.h` | Loopback HTTP listener (`/rescan`, `/status`, `/queue`, `/setlist`, `/library`) |
+| `companion/` | Companion web server (.NET 8) and its phone page (`index.html`) |
 | `src/il2cpp_api.h` | The IL2CPP runtime functions Encore calls |
 | `src/version_proxy.cpp`, `src/version.def` | `version.dll` export forwarding |
 | `tools/encore-rescan.ps1` | Example client for the trigger interface |

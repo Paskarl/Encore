@@ -470,6 +470,8 @@ struct QueueRefs
     const MethodInfo* checksumString = nullptr; // SongEntry getters
     const MethodInfo* nameStripped = nullptr;
     const MethodInfo* artistStripped = nullptr;
+    const MethodInfo* albumStripped = nullptr;    // optional, for GET /library
+    FieldInfo* songLength = nullptr;              // optional: song length in ms, null if not identified
     FieldInfo* gvInstance = nullptr; // GlobalVariables
     FieldInfo* gvPractice = nullptr;
     FieldInfo* gvPlayingSetlist = nullptr;
@@ -604,6 +606,38 @@ static FieldInfo* FindIsLastSong(Il2CppClass* endOfSong)
     return nullptr;
 }
 
+// SongEntry's song length (ms) has an obfuscated field name. get_HasLength is `length > 0`; its
+// first instruction is `cmp dword ptr [rcx+disp], 0`, and the Int32 instance field at that offset
+// is the length (0x80 in v1.1.0.6142).
+static FieldInfo* FindSongLength(Il2CppClass* songEntry)
+{
+    const MethodInfo* hasLength = il2cpp_class_get_method_from_name(songEntry, "get_HasLength", 0);
+    auto code = hasLength ? static_cast<const uint8_t*>(il2cpp_method_pointer(hasLength)) : nullptr;
+    if (!code)
+        return nullptr;
+    size_t disp;
+    if (code[0] == 0x83 && code[1] == 0xB9 && code[6] == 0x00) // cmp dword [rcx+disp32], 0
+    {
+        int32_t d;
+        memcpy(&d, code + 2, sizeof(d));
+        disp = static_cast<size_t>(d);
+    }
+    else if (code[0] == 0x83 && code[1] == 0x79 && code[3] == 0x00) // cmp dword [rcx+disp8], 0
+        disp = code[2];
+    else
+    {
+        Log("queue: get_HasLength has an unexpected shape (%02x %02x), song length not available", code[0], code[1]);
+        return nullptr;
+    }
+    void* it = nullptr;
+    while (FieldInfo* f = il2cpp_class_get_fields(songEntry, &it))
+        if (!IsStatic(f) && il2cpp_field_get_offset(f) == disp &&
+            TypeName(il2cpp_field_get_type(f)) == "System.Int32")
+            return f;
+    Log("queue: no Int32 field at SongEntry+0x%zx, song length not available", disp);
+    return nullptr;
+}
+
 static bool ResolveQueueRefs(const Il2CppImage* game)
 {
     QueueRefs& q = g_queue;
@@ -642,6 +676,8 @@ static bool ResolveQueueRefs(const Il2CppImage* game)
         q.checksumString = il2cpp_class_get_method_from_name(songEntry, "get_ChecksumString", 0);
         q.nameStripped = il2cpp_class_get_method_from_name(songEntry, "get_Name_StrippedTags", 0);
         q.artistStripped = il2cpp_class_get_method_from_name(songEntry, "get_Artist_StrippedTags", 0);
+        q.albumStripped = il2cpp_class_get_method_from_name(songEntry, "get_Album_StrippedTags", 0);
+        q.songLength = FindSongLength(songEntry);
     }
     if (Il2CppClass* gv = il2cpp_class_from_name(game, "", "GlobalVariables"))
     {
@@ -670,14 +706,15 @@ static bool ResolveQueueRefs(const Il2CppImage* game)
            q.artistStripped && q.gvInstance && q.gvPractice && q.gvPlayingSetlist && q.gvSetlistIndex &&
            q.gvOriginalSpeed && q.ssSetlistMenu && q.endOfSong && q.gameManager;
     Log("queue resolve: library=%s setlist=%s/%s/%s (static offsets 0x%zx/0x%zx/0x%zx) songLists=%zu "
-        "SetlistMenu.Add=%s isLastSong=%s (off 0x%zx) setlist panels=%p/%p -> %s",
+        "SetlistMenu.Add=%s isLastSong=%s (off 0x%zx) setlist panels=%p/%p album=%s length=%s (off 0x%zx) -> %s",
         q.library ? il2cpp_class_get_name(q.library) : "-", q.setSongs ? il2cpp_field_get_name(q.setSongs) : "-",
         q.setSpeeds ? il2cpp_field_get_name(q.setSpeeds) : "-", q.setStrings ? il2cpp_field_get_name(q.setStrings) : "-",
         q.setSongs ? il2cpp_field_get_offset(q.setSongs) : 0, q.setSpeeds ? il2cpp_field_get_offset(q.setSpeeds) : 0,
         q.setStrings ? il2cpp_field_get_offset(q.setStrings) : 0, q.songLists.size(),
         q.setlistAdd ? "ok" : "not identified", q.eosIsLastSong ? "ok" : "not identified",
         q.eosIsLastSong ? il2cpp_field_get_offset(q.eosIsLastSong) : 0, q.eosSetlistPanel, q.eosSetlistEndPanel,
-        q.ok ? "ok" : "FAILED (game structure changed?)");
+        q.albumStripped ? "ok" : "-", q.songLength ? "ok" : "not identified",
+        q.songLength ? il2cpp_field_get_offset(q.songLength) : 0, q.ok ? "ok" : "FAILED (game structure changed?)");
     return q.ok;
 }
 
@@ -851,17 +888,39 @@ static void ReplyResult(JsonRequest* req, int status, const char* result, const 
     Reply(req, status, std::string("{\"result\":\"") + result + "\",\"message\":" + JsonString(message) + "}");
 }
 
+// The largest static List<SongEntry> of the library holds all songs.
+static Il2CppObject* AllSongs()
+{
+    Il2CppObject* all = nullptr;
+    for (FieldInfo* f : g_queue.songLists)
+    {
+        Il2CppObject* list = StaticObject(f);
+        if (ListCount(list) > ListCount(all))
+            all = list;
+    }
+    return all;
+}
+
 // GET /setlist
 static void HandleSetlist(JsonRequest* req)
 {
     QueueRefs& q = g_queue;
     if (!g_initDone || !q.ok)
         return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
-    LogLibraryState("GET /setlist");
     Il2CppObject* gv = GlobalVars();
     Il2CppObject* songs = StaticObject(q.setSongs);
     Il2CppObject* speeds = StaticObject(q.setSpeeds);
     int n = ListCount(songs), nv = ListCount(speeds);
+    // Clients poll this; log the state only when the setlist or its position changed.
+    static std::string lastLogged;
+    std::string state = std::to_string(n) + "/" + std::to_string(ListCount(AllSongs())) + "/" +
+                        std::to_string(gv ? GetField<int>(gv, q.gvSetlistIndex) : -1) + "/" +
+                        std::to_string(gv && GetField<bool>(gv, q.gvPlayingSetlist));
+    if (state != lastLogged)
+    {
+        lastLogged = state;
+        LogLibraryState("GET /setlist");
+    }
     std::string body = std::string("{\"playing\":") + (gv && GetField<bool>(gv, q.gvPlayingSetlist) ? "true" : "false") +
                        ",\"index\":" + std::to_string(gv ? GetField<int>(gv, q.gvSetlistIndex) : -1) + ",\"songs\":[";
     for (int i = 0; i < n; ++i)
@@ -873,16 +932,10 @@ static void HandleSetlist(JsonRequest* req)
     Reply(req, 200, body + "]}");
 }
 
-// Looks up a song in the largest static List<SongEntry> of the library (all songs).
+// Looks up a song in the list of all songs.
 static Il2CppObject* FindSong(const JsonRequest* req, int& matches)
 {
-    Il2CppObject* all = nullptr;
-    for (FieldInfo* f : g_queue.songLists)
-    {
-        Il2CppObject* list = StaticObject(f);
-        if (ListCount(list) > ListCount(all))
-            all = list;
-    }
+    Il2CppObject* all = AllSongs();
     matches = 0;
     Il2CppObject* found = nullptr;
     std::wstring checksum = Wide(req->checksum), title = Wide(req->title), artist = Wide(req->artist);
@@ -906,6 +959,157 @@ static Il2CppObject* FindSong(const JsonRequest* req, int& matches)
         }
     }
     return found;
+}
+
+// --- Library search (GET /library) -------------------------------------------------------------
+//
+// Reading a song's strings means several managed calls, so the list of all songs is copied once
+// into native strings and searched from there. The copy is rebuilt when the list changes (another
+// list object, a different items array, size or List<T>._version, e.g. after a rescan).
+
+struct LibrarySong
+{
+    std::string title, artist, album, checksum; // UTF-8, without formatting tags
+    std::wstring titleKey, artistKey;           // lower case, for matching
+    int lengthMs = -1;
+};
+
+struct LibraryCache
+{
+    Il2CppObject* list = nullptr;
+    void* items = nullptr;
+    int count = -1, version = -1;
+    std::vector<LibrarySong> songs;
+};
+static LibraryCache g_library;
+
+static std::wstring Lower(std::wstring s)
+{
+    if (!s.empty())
+        CharLowerBuffW(&s[0], static_cast<DWORD>(s.size()));
+    return s;
+}
+
+static void RefreshLibraryCache()
+{
+    LibraryCache& c = g_library;
+    Il2CppObject* all = AllSongs();
+    void* items = all ? *reinterpret_cast<void**>(reinterpret_cast<char*>(all) + 0x10) : nullptr;
+    int count = ListCount(all);
+    int version = all ? *reinterpret_cast<int*>(reinterpret_cast<char*>(all) + 0x1c) : -1; // List<T>._version
+    if (all == c.list && items == c.items && count == c.count && version == c.version)
+        return;
+    c.list = all;
+    c.items = items;
+    c.count = count;
+    c.version = version;
+    c.songs.clear();
+    c.songs.reserve(count);
+    for (int i = 0; i < count; ++i)
+    {
+        Il2CppObject* song = ListItem<Il2CppObject*>(all, i);
+        if (!song)
+            continue;
+        LibrarySong s;
+        std::wstring title = CallString(g_queue.nameStripped, song), artist = CallString(g_queue.artistStripped, song);
+        s.title = Utf8(title);
+        s.artist = Utf8(artist);
+        s.titleKey = Lower(title);
+        s.artistKey = Lower(artist);
+        if (g_queue.albumStripped)
+            s.album = Utf8(CallString(g_queue.albumStripped, song));
+        s.checksum = Utf8(CallString(g_queue.checksumString, song));
+        if (g_queue.songLength)
+            s.lengthMs = GetField<int>(song, g_queue.songLength);
+        c.songs.push_back(std::move(s));
+    }
+    Log("library: indexed %zu songs for search", c.songs.size());
+}
+
+// Splits the search text into lower-case words.
+static std::vector<std::wstring> SearchWords(const std::wstring& text)
+{
+    std::vector<std::wstring> words;
+    std::wstring lower = Lower(text), word;
+    for (wchar_t ch : lower + L" ")
+    {
+        if (iswspace(ch))
+        {
+            if (!word.empty())
+                words.push_back(word);
+            word.clear();
+        }
+        else
+            word += ch;
+    }
+    return words;
+}
+
+// GET /library: songs whose title or artist contain every word of the search text. Exact and
+// prefix title matches come first, then artist matches, then the rest; each group by artist and
+// title. An empty search lists the library from the start.
+static void HandleLibrary(JsonRequest* req)
+{
+    if (!g_initDone || !g_queue.ok)
+        return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
+    RefreshLibraryCache();
+    const std::vector<LibrarySong>& songs = g_library.songs;
+    std::wstring query = Lower(Wide(req->query));
+    while (!query.empty() && iswspace(query.back()))
+        query.pop_back();
+    while (!query.empty() && iswspace(query.front()))
+        query.erase(0, 1);
+    std::vector<std::wstring> words = SearchWords(query);
+
+    struct Hit
+    {
+        int rank;
+        const LibrarySong* song;
+    };
+    std::vector<Hit> hits;
+    for (const LibrarySong& s : songs)
+    {
+        bool all = true;
+        for (const std::wstring& w : words)
+            if (s.titleKey.find(w) == std::wstring::npos && s.artistKey.find(w) == std::wstring::npos)
+            {
+                all = false;
+                break;
+            }
+        if (!all)
+            continue;
+        int rank = 4;
+        if (query.empty())
+            rank = 0;
+        else if (s.titleKey == query)
+            rank = 0;
+        else if (s.titleKey.compare(0, query.size(), query) == 0)
+            rank = 1;
+        else if (s.artistKey.compare(0, query.size(), query) == 0)
+            rank = 2;
+        else if (s.titleKey.find(query) != std::wstring::npos)
+            rank = 3;
+        hits.push_back({rank, &s});
+    }
+    size_t shown = (std::min)(hits.size(), static_cast<size_t>(req->limit));
+    std::partial_sort(hits.begin(), hits.begin() + shown, hits.end(), [](const Hit& a, const Hit& b) {
+        if (a.rank != b.rank)
+            return a.rank < b.rank;
+        if (a.song->artistKey != b.song->artistKey)
+            return a.song->artistKey < b.song->artistKey;
+        return a.song->titleKey < b.song->titleKey;
+    });
+    std::string body = "{\"query\":" + JsonString(req->query) + ",\"total\":" + std::to_string(hits.size()) +
+                       ",\"library\":" + std::to_string(songs.size()) + ",\"songs\":[";
+    for (size_t i = 0; i < shown; ++i)
+    {
+        const LibrarySong& s = *hits[i].song;
+        body += std::string(i ? "," : "") + "{\"title\":" + JsonString(s.title) + ",\"artist\":" +
+                JsonString(s.artist) + ",\"album\":" + JsonString(s.album) + ",\"checksum\":" +
+                JsonString(s.checksum) + ",\"length\":" +
+                (s.lengthMs > 0 ? std::to_string((s.lengthMs + 500) / 1000) : std::string("null")) + "}";
+    }
+    Reply(req, 200, body + "]}");
 }
 
 static bool GameObjectActive(Il2CppObject* go)
@@ -1132,14 +1336,16 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return TriggerRescanFromSongList("http");
         if (wp == kCmdStatus)
             return QueryStatus();
-        if (wp == kCmdQueue || wp == kCmdSetlist)
+        if (wp == kCmdQueue || wp == kCmdSetlist || wp == kCmdLibrary)
         {
             // Returning 1 tells the listener that this side took (and released) its reference.
             auto* req = reinterpret_cast<JsonRequest*>(lp);
             if (wp == kCmdQueue)
                 HandleQueue(req);
-            else
+            else if (wp == kCmdSetlist)
                 HandleSetlist(req);
+            else
+                HandleLibrary(req);
             if (req->httpStatus == 0)
                 ReplyResult(req, 500, "failed", "request not handled, see encore.log");
             ReleaseRequest(req);

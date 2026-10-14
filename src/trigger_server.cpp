@@ -3,6 +3,7 @@
 //   GET  /status  -> {"ready":..,"scanning":..,"songList":..}
 //   POST /queue   -> adds a song to the setlist (checksum, or title + optional artist)
 //   GET  /setlist -> the current setlist
+//   GET  /library -> library songs whose title or artist contain the search text (q, limit)
 // One connection at a time, Connection: close. The listener only does socket work; every
 // question about game state goes to the window procedure on Unity's main thread.
 #include <winsock2.h>
@@ -311,6 +312,31 @@ static void HandleQueue(SOCKET s, const std::string& query, const std::string& b
     HandleJsonCommand(s, kCmdQueue, req, "POST /queue");
 }
 
+static void HandleLibrary(SOCKET s, const std::string& query)
+{
+    auto* req = new JsonRequest();
+    FormValue(query, "q", req->query);
+    std::string limit;
+    if (FormValue(query, "limit", limit))
+        req->limit = atoi(limit.c_str());
+    if (req->limit < 1 || req->limit > kLibraryMaxLimit)
+    {
+        delete req;
+        char body[128];
+        snprintf(body, sizeof(body), "{\"result\":\"bad_request\",\"message\":\"limit must be 1 to %d\"}",
+                 kLibraryMaxLimit);
+        Respond(s, 400, body);
+        return;
+    }
+    if (req->query.size() > 200)
+    {
+        delete req;
+        Respond(s, 400, "{\"result\":\"bad_request\",\"message\":\"search text too long\"}");
+        return;
+    }
+    HandleJsonCommand(s, kCmdLibrary, req, "GET /library");
+}
+
 static size_t ContentLength(const std::string& head)
 {
     // Header names are case-insensitive.
@@ -407,10 +433,17 @@ static void HandleConnection(SOCKET s)
         else
             MethodNotAllowed(s, "GET", "GET /setlist");
     }
+    else if (strcmp(target, "/library") == 0)
+    {
+        if (isGet)
+            HandleLibrary(s, query);
+        else
+            MethodNotAllowed(s, "GET", "GET /library");
+    }
     else
     {
         Respond(s, 404, "{\"result\":\"error\",\"message\":\"endpoints: POST /rescan, GET /status, POST /queue, "
-                        "GET /setlist\"}");
+                        "GET /setlist, GET /library\"}");
     }
 }
 
@@ -442,7 +475,7 @@ static DWORD WINAPI ListenerThread(LPVOID)
         closesocket(ls);
         return 0;
     }
-    Log("http: listening on http://127.0.0.1:%u (POST /rescan, GET /status, POST /queue, GET /setlist)", s_port);
+    Log("http: listening on http://127.0.0.1:%u (POST /rescan, GET /status, POST /queue, GET /setlist, GET /library)", s_port);
     for (;;)
     {
         SOCKET c = accept(ls, nullptr, nullptr);

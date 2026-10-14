@@ -15,6 +15,7 @@ enum TriggerCommand : WPARAM
     kCmdStatus = 2,
     kCmdQueue = 3,   // lParam = JsonRequest*
     kCmdSetlist = 4, // lParam = JsonRequest*
+    kCmdLibrary = 5, // lParam = JsonRequest*
 };
 
 // Result of kCmdRescan, returned by the window procedure.
@@ -36,7 +37,12 @@ enum StatusFlags : LRESULT
     kStatusSongList = 0x4,
 };
 
-// A request whose answer is a JSON body built on the main thread (kCmdQueue, kCmdSetlist).
+// Bounds of GET /library results.
+static const int kLibraryDefaultLimit = 50;
+static const int kLibraryMaxLimit = 200;
+
+// A request whose answer is a JSON body built on the main thread (kCmdQueue, kCmdSetlist,
+// kCmdLibrary).
 // Both threads hold a reference: if SendMessageTimeout gives up, the window procedure may still
 // handle the message later, so the request must outlive the listener's wait.
 struct JsonRequest
@@ -45,6 +51,9 @@ struct JsonRequest
     // Input (kCmdQueue). Empty / -1 when not given.
     std::string checksum, title, artist;
     int speed = -1;
+    // Input (kCmdLibrary): search text and maximum number of results.
+    std::string query;
+    int limit = kLibraryDefaultLimit;
     // Output, filled on the main thread. httpStatus 0 = not handled.
     int httpStatus = 0;
     std::string body;

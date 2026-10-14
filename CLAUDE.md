@@ -2,8 +2,9 @@
 
 Native Windows DLL that adds a song rescan to Clone Hero's song list, triggered by F5 or by other
 applications through a loopback HTTP endpoint (`POST /rescan`, `GET /status` on
-127.0.0.1:47321, `src/trigger_server.cpp`). It is loaded as a `version.dll` proxy into the Unity
-IL2CPP game and calls game code through the IL2CPP runtime API.
+127.0.0.1:47321, `src/trigger_server.cpp`), and lets other applications queue songs into the
+game's setlist (`POST /queue`, `GET /setlist`). It is loaded as a `version.dll` proxy into the
+Unity IL2CPP game and calls game code through the IL2CPP runtime API.
 
 - What it does and how to use it: `README.md`
 - How the target was reverse engineered, with evidence and an update checklist: `docs/ANALYSIS.md`.
@@ -20,6 +21,8 @@ IL2CPP game and calls game code through the IL2CPP runtime API.
   outside the song list.
 - The HTTP trigger can be tested from here with `tools/encore-rescan.ps1` (`-Status`, `-Wait`).
   Outside the song list it must answer `not_in_song_list`; the in-list refresh needs the user.
+- The queue can be driven from here with `tools/encore-queue.ps1` (`-Title`, `-Checksum`, `-List`)
+  while the user navigates. `GET /setlist` also writes the library and setlist state to the log.
 
 ## Rules
 
@@ -29,6 +32,10 @@ IL2CPP game and calls game code through the IL2CPP runtime API.
   and hands every request to the window procedure with `SendMessageTimeout(WM_ENCORE_TRIGGER)`.
 - Every rescan trigger goes through `TriggerRescanFromSongList(source)`; don't duplicate its checks.
   Rescans are refused outside the song list (unsafe during gameplay/loading).
+- Requests that answer with JSON from the main thread (`/queue`, `/setlist`) pass a refcounted
+  `JsonRequest` as lParam; the window procedure returns 1 when it took and released it.
+- The setlist is three parallel lists (song, speed, string); keep them the same length. Queue
+  through `SetlistMenu.Add` when the song list is open, append to the lists otherwise.
 - The listener binds to `127.0.0.1` only. Don't widen it to other interfaces without an explicit
   decision about authentication.
 - Don't hard-code RVAs or obfuscated names in `src/`. Resolve by unobfuscated class/field names, or

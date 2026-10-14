@@ -187,8 +187,9 @@ coroutine refreshes it:
 ## 7. Song queueing research
 
 **Goal:** queue a song from outside the game (e.g. a phone) so that it plays next, also while
-others are already playing. Status: static analysis done, no prototype yet. Conclusions are
-inferred from decompiled code; nothing below has been exercised at runtime.
+others are already playing. Status: static analysis done and a prototype (`POST /queue`) tested in
+the game; see [Prototype and runtime results](#prototype-and-runtime-results) for what the runtime
+confirmed. The rest of this section is the static analysis as it was done.
 
 ### Method
 
@@ -212,12 +213,15 @@ declaration order:
 
 | Offset | Type | Meaning |
 |---|---|---|
-| `+0x00` | `List<SongEntry>` | song list (exact role not yet confirmed; read by the rescan's list refresh) |
+| `+0x00` | `List<SongEntry>` | **all songs** (runtime: 1649 of 1649; read by the rescan's list refresh) |
 | `+0x08` | `Dictionary<checksum, List<SongEntry>>` | songs by chart checksum |
+| `+0x10` | `List<SongEntry>` | runtime: empty in the song list |
 | `+0x20` | `List<SongEntry>` | **setlist songs** |
 | `+0x28` | `List<int>` | **setlist song speed per entry** |
-| `+0x30` | `List<string>` | setlist string per entry (meaning unknown, filled with a constant) |
+| `+0x30` | `List<string>` | setlist string per entry (runtime: `""` for songs added in the song list) |
+| `+0x38` | `List<SongEntry>` | runtime: also 1649 songs (a second full list, probably sorted) |
 | `+0x48` | `List<entry>` | entries visible in the song list (songs and folders) |
+| `+0xb8` | `List<SongEntry>` | runtime: 1541 songs (a filtered subset) |
 
 Relevant static methods:
 
@@ -234,7 +238,11 @@ Relevant static methods:
 ### Adding to the setlist: `SetlistMenu.Add(SongEntry, int, string)` @ `0x13deb0`
 
 `SetlistMenu` has three methods with this signature. `find-callers` shows `0x13deb0` with 8 callers
-(SongSelect, SongOptions, one more class), `0x13c650` with 1 and `0x13cd10` with none.
+(SongSelect, SongOptions, one more class), `0x13c650` with 1 and `0x13cd10` with none. `0x13c650`
+is a near-identical copy of `0x13deb0` (it differs only in two internal calls) and has one caller
+in that third class, so "the only candidate with outside callers" does not hold here. Encore
+accepts the candidate with clearly the most outside callers (at least 3, and at least twice any
+other).
 
 `0x13deb0`:
 1. if the setlist panel is not active: activates and shows it;
@@ -287,18 +295,53 @@ The next song is read **live from the static setlist list** when "continue" is p
 - **Finding the song:** by chart checksum (`0x174950`, or the `+0x08` dictionary), which matches how
   chart sites identify charts, or by iterating a `List<SongEntry>` and comparing title/artist.
 
+### When `isLastSong` is set
+
+`EndOfSong.Start` (`0x15dc20`) decides it once, when the end screen opens (byte search for
+`mov byte [reg+0xa1]` in the EndOfSong range finds only `Start` and one other method):
+
+```c
+if (gv.isPlayingSetlist) {
+    if (gv.setlistIndex == setlistSongs.Count - 1) { this.isLastSong = true; panel = this.setlist_end; }
+    else                                            { panel = this.setlist; }
+    panel.SetActive(true);
+}
+```
+
+It also writes a "next song" text (`nextSong`, from `setlistSongs[setlistIndex + 1]`) when the
+screen opens. So a song appended while the last song's end screen is already showing would be
+dropped by "continue" (which then clears the setlist). The prototype handles this: if the end
+screen is open with `isLastSong` set and the `setlist_end` panel active, it clears the flag and
+swaps the panels to `setlist`. The "next song" text is not updated.
+
+### Prototype and runtime results
+
+Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore-queue.ps1`):
+
+- **Detection** works as designed: one library class, one setlist triple at static offsets
+  `0x20/0x28/0x30`, `SetlistMenu.Add` = `0x13deb0` (8 vs 1 vs 0 outside callers), `isLastSong`
+  = EndOfSong `+0xa1` (first own bool that is not a backing field).
+- **All songs:** `+0x00` and `+0x38` hold the full library (1649), `+0xb8` 1541, `+0x10` is empty.
+  Encore looks songs up in the largest list.
+- **The string list** holds `""` for a song added with the game's button; the speed was 100.
+  `GlobalVariables.originalSongSpeed` is 0 until a song has been played, so Encore falls back to
+  100 then.
+- **Song list:** queueing through `SetlistMenu.Add` showed the song in the setlist panel
+  immediately (Shadow Moses after Biology, added by the user).
+- **Running setlist:** a song appended to the three lists while the first setlist song was
+  playing came up in turn after the existing setlist songs (Teardrops as song 4 of 4, confirmed
+  by the user).
+- Between setlist songs no scene object is active; `/queue` answers `503 loading` there.
+
 ### Open questions
 
-- When does `EndOfSong` set `isLastSong` (+0xa1)? If it is computed when the end screen opens, a
-  song appended after that point is ignored for this transition (likely a small race window).
-- What the `List<string>` entries mean, and the value of the constant `SongSelect` passes.
-- Which static `List<SongEntry>` holds all songs (vs. filtered views); a runtime count check will
-  tell.
-- Whether appending while `SetlistMenu` is open needs a display refresh, and whether online/
-  multiplayer setlists use the same lists.
-- Update resistance: the library class must be found structurally (static
-  `Dictionary<_, List<SongEntry>>`), the setlist lists by their position (`List<SongEntry>`,
-  `List<int>`, `List<string>` in a row), and `SetlistMenu.Add` by the caller test.
+- The end-screen fix (`isLastSong` reset and panel swap) is not yet tested in the game, and the
+  "next song" text on that screen stays stale.
+- The speed the game passes is the speed setting (settings class static `+0x10`), which Encore
+  does not read yet; it uses `originalSongSpeed`, which can be stale if the speed was changed in
+  the menu since the last song (or 0 → 100 before the first one).
+- Online/multiplayer setlists were not tested.
+- During quickplay there is still no queue; turning a quickplay song into a setlist is not covered.
 
 ## After a game update
 

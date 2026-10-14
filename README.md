@@ -37,15 +37,15 @@ Encore is meant to become the bridge between Clone Hero and external tools:
 |---|---|
 | Rescan from the song list (F5), list refreshes afterwards | **Working** (proof of concept) |
 | Survives game updates (no hard-coded addresses) | **Working**, see [Update resistance](#update-resistance) |
-| Trigger interface for other applications (e.g. local HTTP or named pipe) | Planned |
-| Bridge / folder-watcher integration | Planned, needs the trigger interface |
+| Trigger interface for other applications (local HTTP: `POST /rescan`, `GET /status`) | **Working**, see [Trigger from other applications](#trigger-from-other-applications) |
+| Bridge / folder-watcher integration | Planned, can now use the trigger interface |
 | Companion web app: search and download | Planned |
 | Remote song queueing | Research needed: song selection in the game is not reverse engineered yet |
 
-Today Encore does one thing: press **F5** in the song list and the game runs the same full scan
-as *Settings → General → Scan Songs*. When the scan finishes the list refreshes, so new charts show
-up without leaving the song list. The rescan logic is written so that a different trigger (an
-external request instead of a key press) can reuse it.
+Today Encore does one thing: start the same full scan as *Settings → General → Scan Songs* while
+the song list is open, either when you press **F5** or when another application asks for it over
+a local HTTP endpoint. When the scan finishes the list refreshes, so new charts show up without
+leaving the song list.
 
 Tested with Clone Hero **v1.1.0.6142-final** (Windows x64). Encore does not depend on fixed
 addresses or obfuscated names, so it should keep working across updates as long as the
@@ -72,18 +72,52 @@ Clone Hero loads `version.dll` from its own folder, because `UnityPlayer.dll` im
 
 F5 does nothing in other menus or while a scan is already running.
 
+### Trigger from other applications
+
+While the game runs, Encore listens on **`http://127.0.0.1:47321`**. It binds to loopback only,
+so only programs on the same PC can reach it.
+
+| Request | Response |
+|---|---|
+| `POST /rescan` | `202 {"result":"started"}`: the scan started, the list refreshes when it's done. |
+| | `409 {"result":"not_in_song_list"}`: the song list is not open. Nothing happens. |
+| | `409 {"result":"scanning"}`: a scan is already running. |
+| | `503 {"result":"not_ready"}` / `{"result":"timeout"}`: Encore isn't initialised, or the game didn't answer within 3 s (e.g. while loading). Try again. |
+| `GET /status` | `200 {"ready":true,"scanning":false,"songList":true}` |
+
+An external rescan behaves exactly like F5: it only runs while the song list is open. In other
+menus or during a song it is refused with `not_in_song_list`, because a scan during gameplay or
+a scene load isn't safe and the list refresh only applies to an open song list. A downloader
+should call `/rescan` after a chart is complete; if the answer is `not_in_song_list`, retry later
+or poll `/status` until `songList` is true.
+
+Example client ([`tools/encore-rescan.ps1`](tools/encore-rescan.ps1)):
+
+```powershell
+.\tools\encore-rescan.ps1           # start a rescan
+.\tools\encore-rescan.ps1 -Wait     # start a rescan and wait until it has finished
+.\tools\encore-rescan.ps1 -Status   # show status
+```
+
+Or with curl: `curl -X POST http://127.0.0.1:47321/rescan`.
+
+To use a different port, set the environment variable `ENCORE_PORT` before starting Clone Hero.
+`ENCORE_PORT=0` turns the listener off.
+
 ## Log
 
 Encore writes `encore.log` next to `Clone Hero.exe`:
 
 | Line | Meaning |
 |---|---|
-| `ready: press F5 in the song list to rescan songs` | Everything resolved, F5 is active. |
+| `ready: press F5 in the song list (or POST /rescan) to rescan songs` | Everything resolved, F5 and `/rescan` are active. |
+| `http: listening on http://127.0.0.1:47321 …` | The trigger interface is up. |
+| `http: cannot listen on …` | The port is taken (another program, or a second game instance). F5 still works. |
 | `StartScan candidate RVA=0x… external callers=N` | One line per candidate method, see below. |
 | `StartScan ambiguous: …` | The game changed so that StartScan can't be identified safely. F5 stays off. |
 | `resolve: … -> FAILED` / `resolve failed: …` | A class, field or Unity method Encore needs was not found. F5 stays off. |
-| `F5 ignored: …` | F5 was pressed outside the song list, or a scan was already running. |
-| `rescan started from song list` | F5 started a scan. |
+| `F5 ignored: …` / `http ignored: …` | F5 or `/rescan` came outside the song list, or a scan was already running. |
+| `rescan started from song list (F5)` / `(http)` | F5 or `/rescan` started a scan. |
 
 In every failure case Encore does nothing, and the game keeps running normally.
 
@@ -103,10 +137,12 @@ In every failure case Encore does nothing, and the game keeps running normally.
 
 | Path | Contents |
 |---|---|
-| `src/encore.cpp` | Startup, main-thread hook, StartScan detection, F5 handler |
+| `src/encore.cpp` | Startup, main-thread hook, StartScan detection, rescan and status on the main thread |
+| `src/trigger_server.cpp`, `src/trigger_server.h` | Loopback HTTP listener (`/rescan`, `/status`) |
 | `src/il2cpp_api.h` | The IL2CPP runtime functions Encore calls |
 | `src/version_proxy.cpp`, `src/version.def` | `version.dll` export forwarding |
-| `tools/` | Scripts for repeating the analysis after a game update |
+| `tools/encore-rescan.ps1` | Example client for the trigger interface |
+| `tools/` (other scripts) | Scripts for repeating the analysis after a game update |
 | `docs/ANALYSIS.md` | How the rescan function was found, step by step |
 
 ## Debug dump

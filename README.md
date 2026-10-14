@@ -40,7 +40,7 @@ Encore is meant to become the bridge between Clone Hero and external tools:
 | Trigger interface for other applications (local HTTP: `POST /rescan`, `GET /status`) | **Working**, see [Trigger from other applications](#trigger-from-other-applications) |
 | Bridge / folder-watcher integration | **Working** as a song folder watcher that works with any downloader, see [Rescan automatically after downloads](#rescan-automatically-after-downloads) |
 | Companion web app, step 1: search your library from a phone, queue songs, rescan (`GET /library`) | **Working** (tested from a phone), see [Companion web app](#companion-web-app) |
-| Companion web app, step 2: find and download missing charts | Planned |
+| Companion web app, step 2: find missing charts on enchor.us, download and queue them | **Prototype working** (tested on the PC), see [Download missing charts](#download-missing-charts) |
 | Remote song queueing (`POST /queue`, `GET /setlist`) | **Prototype working**: queues into the game's setlist from the song list and while a setlist plays, see [Queue songs](#queue-songs) |
 
 Encore does two things:
@@ -193,6 +193,7 @@ dotnet run -c Release --project companion
    from the song list (start the setlist as usual) or while a setlist is playing.
 3. The page shows the setlist (the current song highlighted), whether the game is running, and a
    **Rescan** button.
+4. Not in your library? Tap **Search enchor.us**, see [Download missing charts](#download-missing-charts).
 
 **Firewall:** the first start makes Windows ask whether to allow the app on networks. Allow it for
 **private networks** only. If the phone can't load the page, check that the Wi-Fi is set to
@@ -207,11 +208,55 @@ app*).
 - Requests from addresses outside private networks (anything but `10.x`, `172.16–31.x`,
   `192.168.x`, link-local and loopback) are refused, so the companion isn't usable from the
   internet even through a port forward. Don't forward the port.
-- Anyone with the code can queue songs and start rescans while the companion runs, nothing more.
-  To revoke all paired phones, start it once with `--new-token` and scan the new code.
+- Anyone with the code can queue songs, start rescans and download charts that showed up in their
+  enchor.us search, while the companion runs; nothing more. To revoke all paired phones, start it
+  once with `--new-token` and scan the new code.
 
 Options: `--port <n>` (default 47322), `--encore-port <n>` (default 47321, or `ENCORE_PORT`),
-`--new-token`.
+`--songs-dir <folder>` (where downloads go, see below), `--new-token`.
+
+#### Download missing charts
+
+If a song isn't in your library, **Search enchor.us for "…"** below the library results searches
+[enchor.us](https://www.enchor.us/), the community chart database, for that text. Results show
+title, artist, charter, length and instruments, and whether you already have the song:
+
+- **In your library**: this exact chart was downloaded here before. **Queue** queues it.
+- **You have this song (maybe another chart)**: a song with the same title and artist is in the
+  library. **Queue yours** queues that one; **Download** fetches this chart anyway.
+- Otherwise **Download & queue**.
+
+Download & queue saves the chart as a single `.sng` file (Clone Hero reads those directly) to
+`Songs\Encore Downloads\` in your first Clone Hero song folder, then waits until Clone Hero has it
+and queues it. The **Downloads** list on the page shows each step:
+
+1. *Downloading* with progress. The file is written as `….sng.part` and renamed when complete, so
+   neither Clone Hero nor `encore-watch.ps1` ever sees a partial file.
+2. *Scanning*: if the song list is open, the companion starts a rescan itself (the folder watcher
+   may already have). Otherwise it waits: *Open the song list in Clone Hero to load it*.
+3. *Queued at position N*, like `POST /queue`.
+
+Charts with a video background are downloaded without the video. If the downloaded chart turns out
+to be one you already have, the file is discarded and your copy is queued. Downloads are recorded
+in `%LOCALAPPDATA%\Encore\downloads.json`, so a chart is never fetched twice.
+
+Clone Hero identifies a song by the MD5 of its chart file (`notes.mid` or `notes.chart`; for a
+`.sng`, the one packed inside). enchor.us's `md5` is a different value (it names the download), so
+before downloading, the library can only be matched by title and artist. After downloading, the
+companion reads the checksum from the `.sng` and queues by it.
+
+**About the enchor.us API:** enchor.us has no official, documented API, terms of use or published
+rate limits. The companion uses the same two endpoints as
+[Bridge](https://github.com/Geomitron/Bridge) (`POST api.enchor.us/search`, `GET files.enchor.us/<md5>.sng`)
+and keeps its use small:
+- only on request: one search per tap on *Search enchor.us* or *More results* (never while
+  typing), one download per tap; no background crawling and no bulk downloads;
+- at most one search per second and one download at a time; downloads only for charts from a
+  search result;
+- it honours the `X-RateLimit-Remaining`/`-Reset` headers and backs off after `429` (the page
+  says when to try again);
+- it identifies itself as `EncoreCompanion/0.2 (+https://github.com/Paskarl/Encore)`.
+
 
 ### Rescan automatically after downloads
 
@@ -285,7 +330,7 @@ In every failure case Encore does nothing, and the game keeps running normally.
 |---|---|
 | `src/encore.cpp` | Startup, main-thread hook, StartScan detection, rescan, status and song queue on the main thread |
 | `src/trigger_server.cpp`, `src/trigger_server.h` | Loopback HTTP listener (`/rescan`, `/status`, `/queue`, `/setlist`, `/library`) |
-| `companion/` | Companion web server (.NET 8) and its phone page (`index.html`) |
+| `companion/` | Companion web server (.NET 8): `Program.cs` (server, pairing, Encore calls), `Enchor.cs` (enchor.us search, downloads, rescan and queue), `Sng.cs` (Clone Hero checksum of a `.sng`), `index.html` (phone page) |
 | `src/il2cpp_api.h` | The IL2CPP runtime functions Encore calls |
 | `src/version_proxy.cpp`, `src/version.def` | `version.dll` export forwarding |
 | `tools/encore-rescan.ps1` | Example client for the trigger interface |

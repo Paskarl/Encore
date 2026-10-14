@@ -6,7 +6,7 @@ applications through a loopback HTTP endpoint (`POST /rescan`, `GET /status` on
 game's setlist (`POST /queue`, `GET /setlist`) and search the library (`GET /library`). It is
 loaded as a `version.dll` proxy into the Unity IL2CPP game and calls game code through the IL2CPP
 runtime API. `companion/` is a separate .NET 8 web server that makes search, queue and rescan
-usable from a phone on the LAN.
+usable from a phone on the LAN, and downloads missing charts from enchor.us.
 
 - What it does and how to use it: `README.md`
 - How the target was reverse engineered, with evidence and an update checklist: `docs/ANALYSIS.md`.
@@ -51,6 +51,16 @@ usable from a phone on the LAN.
   non-private source addresses are refused. It forwards a fixed set of requests and validates
   parameters (checksum = 32 hex digits), never arbitrary paths. Don't add firewall rules or
   internet exposure without asking the user.
+- enchor.us (unofficial API, no terms or published limits; the user should confirm with the
+  maintainer on the Chorus Encore Discord) is called only from the companion, never from the DLL,
+  and only on explicit user actions: one search per tap, one download per tap, no
+  search-as-you-type, crawling, prefetching or bulk download. Keep the throttle (1 search/s, one
+  download at a time), the rate-limit/429 handling and the User-Agent with the repo URL. Downloads
+  only for md5s from a search result. Test against it sparingly.
+- enchor.us's `md5` is NOT Clone Hero's checksum. Clone Hero's checksum is the MD5 of the chart
+  file (`notes.mid`/`notes.chart`, inside the `.sng` for packed songs); `Sng.cs` computes it after
+  download. Before download, match the library by title + artist or by `downloads.json`.
+- Write downloads as `.part` in the target folder and rename when complete.
 - Don't hard-code RVAs or obfuscated names in `src/`. Resolve by unobfuscated class/field names, or
   by behaviour (see the StartScan caller test). If detection is ambiguous, disable the feature and
   log it; never guess.

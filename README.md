@@ -40,7 +40,7 @@ Encore is meant to become the bridge between Clone Hero and external tools:
 | Trigger interface for other applications (local HTTP: `POST /rescan`, `GET /status`) | **Working**, see [Trigger from other applications](#trigger-from-other-applications) |
 | Bridge / folder-watcher integration | **Working** as a song folder watcher that works with any downloader, see [Rescan automatically after downloads](#rescan-automatically-after-downloads) |
 | Companion web app, step 1: search your library from a phone, queue songs, rescan (`GET /library`) | **Working** (tested from a phone), see [Companion web app](#companion-web-app) |
-| Companion web app, step 2: find missing charts on enchor.us, download and queue them | **Prototype working** (tested on the PC), see [Download missing charts](#download-missing-charts) |
+| Companion web app, step 2: find missing charts on enchor.us, download and queue them | **Working** (tested from a phone), see [Download missing charts](#download-missing-charts) |
 | Remote song queueing (`POST /queue`, `GET /setlist`) | **Prototype working**: queues into the game's setlist from the song list and while a setlist plays, see [Queue songs](#queue-songs) |
 
 Encore does two things:

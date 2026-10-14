@@ -38,7 +38,7 @@ Encore is meant to become the bridge between Clone Hero and external tools:
 | Rescan from the song list (F5), list refreshes afterwards | **Working** (proof of concept) |
 | Survives game updates (no hard-coded addresses) | **Working**, see [Update resistance](#update-resistance) |
 | Trigger interface for other applications (local HTTP: `POST /rescan`, `GET /status`) | **Working**, see [Trigger from other applications](#trigger-from-other-applications) |
-| Bridge / folder-watcher integration | Planned, can now use the trigger interface |
+| Bridge / folder-watcher integration | **Working** as a song folder watcher that works with any downloader, see [Rescan automatically after downloads](#rescan-automatically-after-downloads) |
 | Companion web app: search and download | Planned |
 | Remote song queueing | Research needed: song selection in the game is not reverse engineered yet |
 
@@ -104,6 +104,26 @@ Or with curl: `curl -X POST http://127.0.0.1:47321/rescan`.
 To use a different port, set the environment variable `ENCORE_PORT` before starting Clone Hero.
 `ENCORE_PORT=0` turns the listener off.
 
+### Rescan automatically after downloads
+
+[`tools/encore-watch.ps1`](tools/encore-watch.ps1) watches your song folders and asks Encore for a
+rescan when charts are added or changed. It works with any downloader (Bridge, a browser, a zip
+tool) without changes to that downloader.
+
+```powershell
+.\tools\encore-watch.ps1                                   # watches Documents\Clone Hero\Songs
+.\tools\encore-watch.ps1 -Path 'D:\Songs', 'E:\More Songs'  # other or several song folders
+.\tools\encore-watch.ps1 -QuietSeconds 10                  # wait longer after the last change
+```
+
+- It reacts to `song.ini`, `notes.chart`, `notes.mid` and `.sng` files, and to new or renamed
+  folders that contain them. Other files are ignored.
+- After a burst of changes it waits until nothing has changed for `-QuietSeconds` (default 5), so
+  a download can finish extracting, then sends one `POST /rescan`.
+- If the song list isn't open, the rescan stays pending until you open it, then runs. If a scan
+  is already running, it runs again after that scan. If the game isn't running, it keeps retrying.
+- Leave it running in a console window during a session and stop it with Ctrl+C.
+
 ## Log
 
 Encore writes `encore.log` next to `Clone Hero.exe`:
@@ -142,6 +162,7 @@ In every failure case Encore does nothing, and the game keeps running normally.
 | `src/il2cpp_api.h` | The IL2CPP runtime functions Encore calls |
 | `src/version_proxy.cpp`, `src/version.def` | `version.dll` export forwarding |
 | `tools/encore-rescan.ps1` | Example client for the trigger interface |
+| `tools/encore-watch.ps1` | Song folder watcher that starts a rescan after downloads |
 | `tools/` (other scripts) | Scripts for repeating the analysis after a game update |
 | `docs/ANALYSIS.md` | How the rescan function was found, step by step |
 

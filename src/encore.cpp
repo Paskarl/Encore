@@ -370,6 +370,11 @@ static Il2CppObject* FindActiveInstance(Il2CppClass* k)
 // HTTP trigger; source names the trigger in the log. Outside the song list the request is
 // refused: the scan coroutine would also run from other menus, but during gameplay or a scene
 // load that is not safe, and the list only refreshes when a song list is open anyway.
+// A song scan empties the setlist (at scan start). Rescans started by Encore save it first and
+// put it back when the scan has finished; see "Setlist across rescans" below.
+static void SaveSetlistForRescan();
+static void RestoreSetlistIfScanDone();
+
 static RescanResult TriggerRescanFromSongList(const char* source)
 {
     if (!g_initDone || !g_refs.ok)
@@ -417,6 +422,7 @@ static RescanResult TriggerRescanFromSongList(const char* source)
     void* activeArgs[] = {&on};
     Invoke(g_refs.setActive, container, activeArgs);
     il2cpp_field_set_value(songScan, g_refs.waitForFinish, &on);
+    SaveSetlistForRescan();
     bool fullScan = true;
     void* args[] = {&fullScan};
     Invoke(g_refs.startScan, songScan, args);
@@ -430,6 +436,7 @@ static LRESULT QueryStatus()
     LRESULT r = kStatusValid;
     if (!g_initDone || !g_refs.ok)
         return r;
+    RestoreSetlistIfScanDone();
     r |= kStatusReady;
     if (FindActiveInstance(g_refs.songSelect))
         r |= kStatusSongList;
@@ -901,9 +908,110 @@ static Il2CppObject* AllSongs()
     return all;
 }
 
+// --- Setlist across rescans ----------------------------------------------------------------------
+//
+// The scan clears the setlist lists (and the setlist panel) as soon as it starts; measured on
+// v1.1.0.6142 with POST /rescan: 2 songs before, 0 within 25 ms, still 0 after the scan. Rescans
+// started by Encore (F5, /rescan, so also the folder watcher and the companion's downloads) save
+// the setlist before StartScan and add the songs back, found again by checksum, once isScanning
+// is false. The restore runs from a timer and before every /status, /queue and /setlist request,
+// so a song queued right after a rescan lands behind the restored ones.
+
+struct SavedSetlistEntry
+{
+    std::wstring checksum;
+    int speed;
+};
+static std::vector<SavedSetlistEntry> g_savedSetlist;
+static bool g_restorePending = false;
+static const UINT_PTR kRestoreTimer = 0x4C4A;
+
+static void SaveSetlistForRescan()
+{
+    QueueRefs& q = g_queue;
+    if (!q.ok || g_restorePending)
+        return;
+    Il2CppObject* songs = StaticObject(q.setSongs);
+    Il2CppObject* speeds = StaticObject(q.setSpeeds);
+    int n = ListCount(songs), nv = ListCount(speeds);
+    g_savedSetlist.clear();
+    for (int i = 0; i < n; ++i)
+        if (Il2CppObject* song = ListItem<Il2CppObject*>(songs, i))
+            g_savedSetlist.push_back({CallString(q.checksumString, song), i < nv ? ListItem<int>(speeds, i) : 100});
+    if (g_savedSetlist.empty())
+        return;
+    g_restorePending = true;
+    SetTimer(g_unityWnd, kRestoreTimer, 250, nullptr);
+    Log("rescan: saved %zu setlist songs to restore after the scan", g_savedSetlist.size());
+}
+
+static void RestoreSetlistIfScanDone()
+{
+    QueueRefs& q = g_queue;
+    if (!g_restorePending)
+        return;
+    if (Il2CppObject* songScan = FindActiveInstance(g_refs.songScan))
+        if (GetField<bool>(songScan, g_refs.isScanning))
+            return;
+    g_restorePending = false;
+    KillTimer(g_unityWnd, kRestoreTimer);
+
+    // One pass over the library: the new SongEntry objects for the saved checksums.
+    std::vector<Il2CppObject*> found(g_savedSetlist.size(), nullptr);
+    Il2CppObject* all = AllSongs();
+    int n = ListCount(all);
+    for (int i = 0; i < n; ++i)
+    {
+        Il2CppObject* song = ListItem<Il2CppObject*>(all, i);
+        if (!song)
+            continue;
+        std::wstring checksum = CallString(q.checksumString, song);
+        for (size_t k = 0; k < g_savedSetlist.size(); ++k)
+            if (!found[k] && SameText(g_savedSetlist[k].checksum, checksum))
+                found[k] = song;
+    }
+
+    Il2CppObject* songs = StaticObject(q.setSongs);
+    Il2CppObject* speeds = StaticObject(q.setSpeeds);
+    Il2CppObject* strings = StaticObject(q.setStrings);
+    if (!songs || !speeds || !strings)
+        return;
+    int before = ListCount(songs);
+    Il2CppObject* songSelect = FindActiveInstance(g_refs.songSelect);
+    Il2CppObject* menu = songSelect && q.setlistAdd ? GetField<Il2CppObject*>(songSelect, q.ssSetlistMenu) : nullptr;
+    int restored = 0, missing = 0;
+    for (size_t k = 0; k < g_savedSetlist.size(); ++k)
+    {
+        if (!found[k])
+        {
+            ++missing;
+            Log("rescan: setlist song %s is no longer in the library, not restored", Utf8(g_savedSetlist[k].checksum).c_str());
+            continue;
+        }
+        int speed = g_savedSetlist[k].speed;
+        Il2CppObject* str = reinterpret_cast<Il2CppObject*>(il2cpp_string_new(""));
+        if (menu)
+        {
+            // Like the "add to setlist" button, so the setlist panel shows the song again.
+            void* args[] = {found[k], &speed, str};
+            Invoke(q.setlistAdd, menu, args);
+        }
+        else if (!ListAdd(speeds, &speed) || !ListAdd(strings, str) || !ListAdd(songs, found[k]))
+        {
+            Log("rescan: List.Add failed while restoring the setlist");
+            break;
+        }
+        ++restored;
+    }
+    Log("rescan: restored %d of %zu setlist songs (%d missing, %d were already in the setlist)%s", restored,
+        g_savedSetlist.size(), missing, before, menu ? "" : " without the setlist panel");
+    g_savedSetlist.clear();
+}
+
 // GET /setlist
 static void HandleSetlist(JsonRequest* req)
 {
+    RestoreSetlistIfScanDone();
     QueueRefs& q = g_queue;
     if (!g_initDone || !q.ok)
         return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
@@ -1155,6 +1263,7 @@ static void HandleQueue(JsonRequest* req)
     QueueRefs& q = g_queue;
     if (!g_initDone || !g_refs.ok || !q.ok)
         return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
+    RestoreSetlistIfScanDone();
     Il2CppObject* gv = GlobalVars();
     if (!gv)
         return ReplyResult(req, 503, "not_ready", "GlobalVariables not available yet");
@@ -1327,6 +1436,11 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_POC_INIT || (msg == WM_TIMER && wp == kInitTimer))
     {
         OnMainThreadInit(hwnd);
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kRestoreTimer)
+    {
+        RestoreSetlistIfScanDone();
         return 0;
     }
     // Sent by the HTTP listener thread with SendMessageTimeout; handled here on the main thread.

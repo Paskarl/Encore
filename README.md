@@ -121,6 +121,11 @@ setlist:
   already in it. If the end screen of the last song is already showing ("setlist finished"),
   Encore switches it back to "continue" so the queued song is played.
 
+A song scan empties Clone Hero's setlist. Rescans started through Encore (F5, `POST /rescan`, the
+folder watcher, the companion's downloads) keep it: Encore saves the setlist before the scan and
+adds the songs back, in order, when the scan has finished. A song queued right after a rescan
+goes behind them. Scans started from the game's *Settings* menu still clear the setlist.
+
 Parameters, as query string, form body or JSON body (`{"checksum":"…"}`):
 
 | Parameter | Meaning |
@@ -300,6 +305,7 @@ Encore writes `encore.log` next to `Clone Hero.exe`:
 | `queue: … song length not available` | The song length field wasn't found; `/library` answers `"length":null`, everything else works. |
 | `queued (mode, N matches): …` / `queue refused: …` | Result of a `/queue` request. |
 | `queue: end screen had ended the setlist; switched it back to "continue"` | A song was queued on the last song's end screen. |
+| `rescan: saved N setlist songs …` / `rescan: restored N of M setlist songs …` | The setlist was kept across a rescan. Songs whose charts were removed are not restored and listed. |
 
 In every failure case Encore does nothing, and the game keeps running normally.
 

@@ -42,6 +42,10 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
   Rescans are refused outside the song list (unsafe during gameplay/loading).
 - Requests that answer with JSON from the main thread (`/queue`, `/setlist`, `/library`) pass a refcounted
   `JsonRequest` as lParam; the window procedure returns 1 when it took and released it.
+- A song scan empties the setlist at scan start. `TriggerRescanFromSongList` saves it
+  (`SaveSetlistForRescan`) and `RestoreSetlistIfScanDone` adds it back by checksum; that runs from
+  a timer and before `/status`, `/queue` and `/setlist`, so queued songs land behind the restored
+  ones. Keep that order when adding new requests that touch the setlist.
 - The setlist is three parallel lists (song, speed, string); keep them the same length. Queue
   through `SetlistMenu.Add` when the song list is open, append to the lists otherwise.
 - The listener binds to `127.0.0.1` only. Don't widen it to other interfaces without an explicit

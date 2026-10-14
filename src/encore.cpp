@@ -1,7 +1,8 @@
 // Encore: rescan songs from Clone Hero's song list.
 // Runs inside the game (loaded through the version.dll proxy), subclasses the Unity window
 // so all IL2CPP calls happen on the Unity main thread, and starts a song rescan when F5 is
-// pressed in the song list. With ENCORE_DUMP=1 it also dumps the analysed classes.
+// pressed in the song list or another application sends POST /rescan to the loopback HTTP
+// listener (trigger_server.cpp). With ENCORE_DUMP=1 it also dumps the analysed classes.
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
@@ -10,14 +11,17 @@
 #include <vector>
 #include <algorithm>
 #include "il2cpp_api.h"
+#include "trigger_server.h"
 
 static FILE* g_log = nullptr;
 static HWND g_unityWnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 static bool g_initDone = false;
 static const UINT WM_POC_INIT = WM_APP + 0x4C48;
+static const UINT WM_ENCORE_TRIGGER = WM_APP + 0x4C49; // wParam = TriggerCommand
+static const unsigned short kDefaultPort = 47321;
 
-static void Log(const char* fmt, ...)
+void Log(const char* fmt, ...)
 {
     if (!g_log)
         return;
@@ -342,28 +346,35 @@ static Il2CppObject* FindActiveInstance(Il2CppClass* k)
     return nullptr;
 }
 
-static void TriggerRescanFromSongList()
+// Starts a full rescan if the song list is open and no scan is running. Used by F5 and by the
+// HTTP trigger; source names the trigger in the log. Outside the song list the request is
+// refused: the scan coroutine would also run from other menus, but during gameplay or a scene
+// load that is not safe, and the list only refreshes when a song list is open anyway.
+static RescanResult TriggerRescanFromSongList(const char* source)
 {
-    if (!g_refs.ok)
-        return;
+    if (!g_initDone || !g_refs.ok)
+    {
+        Log("%s ignored: Encore is not ready", source);
+        return kRescanNotReady;
+    }
     Il2CppObject* songSelect = FindActiveInstance(g_refs.songSelect);
     if (!songSelect)
     {
-        Log("F5 ignored: song list is not open");
-        return;
+        Log("%s ignored: song list is not open", source);
+        return kRescanNotInSongList;
     }
     Il2CppObject* songScan = FindActiveInstance(g_refs.songScan);
     if (!songScan)
     {
-        Log("F5 ignored: no active SongScan instance");
-        return;
+        Log("%s ignored: no active SongScan instance", source);
+        return kRescanFailed;
     }
     bool scanning = false;
     il2cpp_field_get_value(songScan, g_refs.isScanning, &scanning);
     if (scanning)
     {
-        Log("F5 ignored: scan already running");
-        return;
+        Log("%s ignored: scan already running", source);
+        return kRescanBusy;
     }
     // Make sure the scan coroutine refreshes this song list when it finishes.
     Il2CppObject* linked = nullptr;
@@ -379,8 +390,8 @@ static void TriggerRescanFromSongList()
     il2cpp_field_get_value(songScan, g_refs.container, &container);
     if (!container)
     {
-        Log("F5 ignored: SongScan.container is null");
-        return;
+        Log("%s ignored: SongScan.container is null", source);
+        return kRescanFailed;
     }
     bool on = true;
     void* activeArgs[] = {&on};
@@ -389,7 +400,27 @@ static void TriggerRescanFromSongList()
     bool fullScan = true;
     void* args[] = {&fullScan};
     Invoke(g_refs.startScan, songScan, args);
-    Log("rescan started from song list");
+    Log("rescan started from song list (%s)", source);
+    return kRescanStarted;
+}
+
+// Answers GET /status. Runs on the main thread like everything else that touches IL2CPP.
+static LRESULT QueryStatus()
+{
+    LRESULT r = kStatusValid;
+    if (!g_initDone || !g_refs.ok)
+        return r;
+    r |= kStatusReady;
+    if (FindActiveInstance(g_refs.songSelect))
+        r |= kStatusSongList;
+    if (Il2CppObject* songScan = FindActiveInstance(g_refs.songScan))
+    {
+        bool scanning = false;
+        il2cpp_field_get_value(songScan, g_refs.isScanning, &scanning);
+        if (scanning)
+            r |= kStatusScanning;
+    }
+    return r;
 }
 
 static bool DumpRequested()
@@ -436,7 +467,7 @@ static void OnMainThreadInit(HWND hwnd)
         Log("dump done");
     }
     if (ResolveGameRefs(game))
-        Log("ready: press F5 in the song list to rescan songs");
+        Log("ready: press F5 in the song list (or POST /rescan) to rescan songs");
 }
 
 static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -452,9 +483,18 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         OnMainThreadInit(hwnd);
         return 0;
     }
+    // Sent by the HTTP listener thread with SendMessageTimeout; handled here on the main thread.
+    if (msg == WM_ENCORE_TRIGGER)
+    {
+        if (wp == kCmdRescan)
+            return TriggerRescanFromSongList("http");
+        if (wp == kCmdStatus)
+            return QueryStatus();
+        return 0;
+    }
     // Bit 30 of lParam = key was already down (auto-repeat).
     if (msg == WM_KEYDOWN && wp == VK_F5 && !(lp & (1 << 30)) && g_initDone)
-        TriggerRescanFromSongList();
+        TriggerRescanFromSongList("F5");
     return CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp);
 }
 
@@ -469,6 +509,22 @@ static BOOL CALLBACK FindUnityWindow(HWND hwnd, LPARAM)
         return FALSE;
     }
     return TRUE;
+}
+
+// ENCORE_PORT overrides the listener port; 0 turns the trigger interface off.
+static unsigned short TriggerPort()
+{
+    wchar_t v[16];
+    if (GetEnvironmentVariableW(L"ENCORE_PORT", v, 16) == 0)
+        return kDefaultPort;
+    wchar_t* end = nullptr;
+    long p = wcstol(v, &end, 10);
+    if (end == v || *end || p < 0 || p > 65535)
+    {
+        Log("http: invalid ENCORE_PORT, using %u", kDefaultPort);
+        return kDefaultPort;
+    }
+    return static_cast<unsigned short>(p);
 }
 
 static DWORD WINAPI Bootstrap(LPVOID)
@@ -490,6 +546,10 @@ static DWORD WINAPI Bootstrap(LPVOID)
     g_origWndProc = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrW(g_unityWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookWndProc)));
     PostMessageW(g_unityWnd, WM_POC_INIT, 0, 0);
+    if (unsigned short port = TriggerPort())
+        StartTriggerServer(g_unityWnd, WM_ENCORE_TRIGGER, port);
+    else
+        Log("http: trigger interface off (ENCORE_PORT=0)");
     return 0;
 }
 

@@ -206,6 +206,7 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, str
             {
                 id = j.Id, md5 = j.Chart.Md5, title = j.Chart.Title, artist = j.Chart.Artist, charter = j.Chart.Charter,
                 state = j.State, message = j.Message, bytes = j.Bytes, total = j.Total, position = j.Position,
+                ageSeconds = (int)(DateTime.UtcNow - j.Updated).TotalSeconds,
             }).ToList();
     }
 

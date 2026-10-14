@@ -344,7 +344,8 @@ async function refreshDownloads() {
   try {
     const data = await api("GET", "downloads");
     downloadsActive = data.jobs.some(j => ["downloading", "waiting", "scanning"].includes(j.state));
-    const key = JSON.stringify(data.jobs);
+    // Ages change every poll; compare without them, but redraw at least every 30 s for the labels.
+    const key = JSON.stringify(data.jobs.map(j => ({ ...j, ageSeconds: Math.floor(j.ageSeconds / 30) })));
     if (key === downloadsKey) return;
     // Jobs that just reached "queued" since the last refresh (none on the first load).
     const before = downloadsKey ? JSON.parse(downloadsKey) : null;
@@ -363,6 +364,12 @@ async function refreshDownloads() {
       if (j.state === "downloading" && j.bytes) {
         const mb = (j.bytes / 1048576).toFixed(1);
         text = j.total ? `Downloading… ${mb} of ${(j.total / 1048576).toFixed(1)} MB` : `Downloading… ${mb} MB`;
+      }
+      if (j.state === "queued" || j.state === "failed") {
+        // Finished: the position was right at the time; the setlist below is the current state.
+        const m = Math.floor(j.ageSeconds / 60);
+        text += m < 1 ? " Just now." : ` ${m} min ago.`;
+        li.classList.add("done");
       }
       state.textContent = text;
       li.querySelector(".song").append(state);

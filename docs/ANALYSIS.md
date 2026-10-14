@@ -331,12 +331,14 @@ Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore
 - **Running setlist:** a song appended to the three lists while the first setlist song was
   playing came up in turn after the existing setlist songs (Teardrops as song 4 of 4, confirmed
   by the user).
+- **End screen of the last song:** queueing there (Kool-Aid after Teardrops) cleared
+  `isLastSong`, the screen showed the "continue" buttons again, and "continue" started the queued
+  song instead of returning to the menu.
 - Between setlist songs no scene object is active; `/queue` answers `503 loading` there.
 
 ### Open questions
 
-- The end-screen fix (`isLastSong` reset and panel swap) is not yet tested in the game, and the
-  "next song" text on that screen stays stale.
+- After the end-screen fix the "next song" text on that screen stays stale (blank or old).
 - The speed the game passes is the speed setting (settings class static `+0x10`), which Encore
   does not read yet; it uses `originalSongSpeed`, which can be stale if the speed was changed in
   the menu since the last song (or 0 → 100 before the first one).

@@ -117,8 +117,8 @@ setlist:
   panel opens and shows it. Start the setlist as usual.
 - **While a setlist is playing** it is appended to the running setlist and played after the songs
   already in it. If the end screen of the last song is already showing ("setlist finished"),
-  Encore switches it back to "continue" so the queued song is played (not yet tested in the
-  game).
+  Encore switches it back to "continue" so the queued song is played. The "next song" text on
+  that screen is not updated.
 
 Parameters, as query string, form body or JSON body (`{"checksum":"…"}`):
 

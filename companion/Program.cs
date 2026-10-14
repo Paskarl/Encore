@@ -21,7 +21,7 @@ using QRCoder;
 var options = Options.Parse(args);
 if (options == null)
 {
-    Console.Error.WriteLine("usage: EncoreCompanion [--port 47322] [--encore-port 47321] [--new-token]");
+    Console.Error.WriteLine("usage: EncoreCompanion [--port 47322] [--encore-port 47321] [--songs-dir <folder>] [--new-token]");
     return 2;
 }
 Console.OutputEncoding = Encoding.UTF8;
@@ -38,6 +38,10 @@ builder.Services.AddHttpClient("encore", c =>
     c.BaseAddress = new Uri($"http://127.0.0.1:{options.EncorePort}/");
     c.Timeout = TimeSpan.FromSeconds(6);
 });
+string songsDir = options.SongsDir ?? SongsFolder.Find();
+builder.Services.AddSingleton(new EnchorClient(new HttpClient { Timeout = TimeSpan.FromMinutes(10) }));
+builder.Services.AddSingleton(sp => new DownloadManager(sp.GetRequiredService<EnchorClient>(),
+                                                        sp.GetRequiredService<IHttpClientFactory>(), songsDir));
 var app = builder.Build();
 
 app.Use(async (ctx, next) =>
@@ -113,6 +117,96 @@ app.MapPost("/api/queue", async (IHttpClientFactory f, HttpRequest req) =>
     return await Encore.Forward(f, HttpMethod.Post, "queue", JsonSerializer.Serialize(new { checksum = body.Checksum }));
 });
 
+// --- enchor.us (step 2): only on explicit requests from the phone, see Enchor.cs ---
+
+app.MapPost("/api/enchor/search", async (HttpRequest req, EnchorClient enchor, DownloadManager downloads, IHttpClientFactory f) =>
+{
+    EnchorSearchRequest? body = null;
+    try
+    {
+        body = await req.ReadFromJsonAsync<EnchorSearchRequest>();
+    }
+    catch (JsonException)
+    {
+    }
+    string q = (body?.Q ?? "").Trim();
+    int page = body?.Page ?? 1;
+    if (q.Length is < 1 or > 100 || page is < 1 or > 50)
+        return Results.BadRequest(new { result = "bad_request", message = "give a search text (1–100 characters)" });
+    int found;
+    List<EnchorChart> charts;
+    try
+    {
+        (found, charts) = await enchor.Search(q, page);
+    }
+    catch (EnchorBusyException e)
+    {
+        return Results.Json(new { result = "enchor_busy", message = $"enchor.us asked to slow down. Try again in {e.RetryAfterSeconds} s.", retryAfter = e.RetryAfterSeconds },
+                            statusCode: StatusCodes.Status429TooManyRequests);
+    }
+    catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException)
+    {
+        return Results.Json(new { result = "enchor_error", message = "enchor.us didn't answer properly. Try again later." },
+                            statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    // Mark charts the library already has. enchor.us's md5 is not Clone Hero's checksum, so match
+    // a chart downloaded here by its recorded checksum, anything else by title and artist.
+    bool libraryChecked = true;
+    var library = new Dictionary<string, List<Encore.LibrarySong>>(StringComparer.OrdinalIgnoreCase);
+    foreach (string title in charts.Select(c => c.Title).Where(t => t.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase))
+    {
+        var songs = await Encore.Search(f, title, 50);
+        if (songs == null)
+        {
+            libraryChecked = false;
+            break;
+        }
+        library[title] = songs;
+    }
+    static string Norm(string s) => Regex.Replace(EnchorClient.StripTags(s), @"\s+", " ").Trim();
+    var result = charts.Select(c =>
+    {
+        var candidates = library.GetValueOrDefault(c.Title) ?? new();
+        string? known = downloads.KnownChecksum(c.Md5);
+        var exact = known == null ? null : candidates.FirstOrDefault(s => s.Checksum.Equals(known, StringComparison.OrdinalIgnoreCase));
+        var same = exact ?? candidates.FirstOrDefault(s => Norm(s.Title).Equals(Norm(c.Title), StringComparison.OrdinalIgnoreCase) &&
+                                                           Norm(s.Artist).Equals(Norm(c.Artist), StringComparison.OrdinalIgnoreCase));
+        return new
+        {
+            md5 = c.Md5, title = c.Title, artist = c.Artist, album = c.Album, charter = c.Charter, length = c.Length,
+            instruments = c.Instruments,
+            inLibrary = same == null ? null : new { checksum = same.Checksum, exact = exact != null },
+        };
+    }).ToList();
+    return Results.Json(new { found, page, perPage = EnchorClient.PerPage, libraryChecked, charts = result });
+});
+
+app.MapPost("/api/enchor/download", async (HttpRequest req, EnchorClient enchor, DownloadManager downloads) =>
+{
+    QueueRequest? body = null;
+    try
+    {
+        body = await req.ReadFromJsonAsync<QueueRequest>();
+    }
+    catch (JsonException)
+    {
+    }
+    string md5 = body?.Md5 ?? "";
+    if (!checksumPattern.IsMatch(md5))
+        return Results.BadRequest(new { result = "bad_request", message = "give the chart's md5" });
+    // Only charts from a search result: the phone can't make the companion fetch arbitrary files.
+    var chart = enchor.Seen(md5);
+    if (chart == null)
+        return Results.BadRequest(new { result = "unknown_chart", message = "search enchor.us for the chart first" });
+    var job = downloads.Start(chart, out string? refusal);
+    if (job == null)
+        return Results.Json(new { result = "busy", message = refusal }, statusCode: StatusCodes.Status409Conflict);
+    return Results.Json(new { result = "started", id = job.Id }, statusCode: StatusCodes.Status202Accepted);
+});
+
+app.MapGet("/api/downloads", (DownloadManager downloads) => Results.Json(new { jobs = downloads.Snapshot() }));
+
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var urls = Network.PairUrls(options.Port, token);
@@ -131,6 +225,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine();
     Console.WriteLine($"If the QR code above doesn't scan, open http://localhost:{options.Port}/pair on this PC.");
     Console.WriteLine($"Talking to Encore on http://127.0.0.1:{options.EncorePort}. Stop with Ctrl+C.");
+    Console.WriteLine($"Charts from enchor.us are saved to {app.Services.GetRequiredService<DownloadManager>().DownloadDir}");
     if (tokenIsNew)
         Pairing.OpenInBrowser($"http://localhost:{options.Port}/pair");
 });
@@ -138,13 +233,45 @@ app.Lifetime.ApplicationStarted.Register(() =>
 app.Run();
 return 0;
 
-record QueueRequest(string? Checksum);
+record QueueRequest(string? Checksum, string? Md5 = null);
+record EnchorSearchRequest(string? Q, int? Page);
+
+// Clone Hero's first song folder: [directories] path0 in Documents\Clone Hero\settings.ini, or
+// the default Documents\Clone Hero\Songs when that is empty.
+static class SongsFolder
+{
+    public static string Find()
+    {
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Clone Hero");
+        try
+        {
+            bool inDirectories = false;
+            foreach (string raw in File.ReadLines(Path.Combine(root, "settings.ini")))
+            {
+                string line = raw.Trim();
+                if (line.StartsWith('['))
+                    inDirectories = line.Equals("[directories]", StringComparison.OrdinalIgnoreCase);
+                else if (inDirectories && line.StartsWith("path", StringComparison.OrdinalIgnoreCase) && line.Contains('='))
+                {
+                    string value = line[(line.IndexOf('=') + 1)..].Trim();
+                    if (value.Length > 0 && Directory.Exists(value))
+                        return value;
+                }
+            }
+        }
+        catch (IOException)
+        {
+        }
+        return Path.Combine(root, "Songs");
+    }
+}
 
 sealed class Options
 {
     public int Port = 47322;
     public int EncorePort = 47321;
     public bool NewToken;
+    public string? SongsDir;
 
     public static Options? Parse(string[] args)
     {
@@ -163,6 +290,9 @@ sealed class Options
                     o.EncorePort = e;
                     ++i;
                     break;
+                case "--songs-dir" when i + 1 < args.Length && Directory.Exists(args[i + 1]):
+                    o.SongsDir = args[++i];
+                    break;
                 case "--new-token":
                     o.NewToken = true;
                     break;
@@ -176,8 +306,10 @@ sealed class Options
 
 static class Encore
 {
-    // Forwards a request to Encore and passes its status code and JSON answer through.
-    public static async Task<IResult> Forward(IHttpClientFactory factory, HttpMethod method, string path, string? json = null)
+    public const int Offline = 0;
+
+    // Sends a request to Encore. Status 0 (Offline) means Encore did not answer at all.
+    public static async Task<(int status, string body)> Call(IHttpClientFactory factory, HttpMethod method, string path, string? json = null)
     {
         var client = factory.CreateClient("encore");
         using var msg = new HttpRequestMessage(method, path);
@@ -186,14 +318,64 @@ static class Encore
         try
         {
             using var resp = await client.SendAsync(msg);
-            string body = await resp.Content.ReadAsStringAsync();
-            return Results.Content(body, "application/json; charset=utf-8", Encoding.UTF8, (int)resp.StatusCode);
+            return ((int)resp.StatusCode, await resp.Content.ReadAsStringAsync());
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
         {
+            return (Offline, "");
+        }
+    }
+
+    // Forwards a request to Encore and passes its status code and JSON answer through.
+    public static async Task<IResult> Forward(IHttpClientFactory factory, HttpMethod method, string path, string? json = null)
+    {
+        var (status, body) = await Call(factory, method, path, json);
+        if (status == Offline)
             return Results.Json(new { result = "encore_offline", message = "Clone Hero with Encore is not running on the PC" },
                                 statusCode: StatusCodes.Status502BadGateway);
+        return Results.Content(body, "application/json; charset=utf-8", Encoding.UTF8, status);
+    }
+
+    public record LibrarySong(string Title, string Artist, string Album, string Checksum);
+
+    // Library songs matching a search text (GET /library); null if Encore is not reachable or not ready.
+    public static async Task<List<LibrarySong>?> Search(IHttpClientFactory factory, string q, int limit = 200)
+    {
+        var (status, body) = await Call(factory, HttpMethod.Get, $"library?q={Uri.EscapeDataString(q)}&limit={limit}");
+        if (status != 200)
+            return null;
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("songs").EnumerateArray().Select(s => new LibrarySong(
+            s.GetProperty("title").GetString() ?? "", s.GetProperty("artist").GetString() ?? "",
+            s.GetProperty("album").GetString() ?? "", s.GetProperty("checksum").GetString() ?? "")).ToList();
+    }
+
+    // Finds a library song by its checksum. /library searches text only, so look it up by title
+    // and, failing that, by artist.
+    public static async Task<(bool reachable, LibrarySong? song)> FindByChecksum(IHttpClientFactory factory, string checksum, string title, string artist)
+    {
+        bool reachable = false;
+        foreach (string q in new[] { title, artist }.Where(s => s.Trim().Length > 0).Distinct())
+        {
+            var songs = await Search(factory, q);
+            if (songs == null)
+                continue;
+            reachable = true;
+            var hit = songs.FirstOrDefault(s => string.Equals(s.Checksum, checksum, StringComparison.OrdinalIgnoreCase));
+            if (hit != null)
+                return (true, hit);
         }
+        return (reachable, null);
+    }
+
+    public static async Task<(bool ok, bool scanning, bool songList)> Status(IHttpClientFactory factory)
+    {
+        var (status, body) = await Call(factory, HttpMethod.Get, "status");
+        if (status != 200)
+            return (false, false, false);
+        using var doc = JsonDocument.Parse(body);
+        var r = doc.RootElement;
+        return (true, r.GetProperty("scanning").GetBoolean(), r.GetProperty("songList").GetBoolean());
     }
 }
 

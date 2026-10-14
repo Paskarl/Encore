@@ -312,7 +312,8 @@ It also writes a "next song" text (`nextSong`, from `setlistSongs[setlistIndex +
 screen opens. So a song appended while the last song's end screen is already showing would be
 dropped by "continue" (which then clears the setlist). The prototype handles this: if the end
 screen is open with `isLastSong` set and the `setlist_end` panel active, it clears the flag and
-swaps the panels to `setlist`. The "next song" text is not updated.
+swaps the panels to `setlist`. Encore doesn't touch the "next song" text; in the test the
+end screen looked as planned anyway.
 
 ### Prototype and runtime results
 
@@ -338,7 +339,6 @@ Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore
 
 ### Open questions
 
-- After the end-screen fix the "next song" text on that screen stays stale (blank or old).
 - The speed the game passes is the speed setting (settings class static `+0x10`), which Encore
   does not read yet; it uses `originalSongSpeed`, which can be stale if the speed was changed in
   the menu since the last song (or 0 → 100 before the first one).

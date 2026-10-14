@@ -44,6 +44,17 @@ li.done { opacity: .55; }
 .empty { color: var(--muted); padding: 14px 12px; }
 #toast { position: fixed; left: 16px; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); max-width: 560px; margin: 0 auto; padding: 12px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: .95rem; opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s; pointer-events: none; }
 #toast.show { opacity: 1; transform: none; }
+.offer { padding: 10px 0 0; }
+.offer button { width: 100%; }
+.actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.actions button { white-space: nowrap; }
+.tag { font-size: .8rem; color: var(--ok); }
+.state { font-size: .85rem; color: var(--muted); }
+.state.failed { color: var(--bad); }
+.state.queued { color: var(--ok); }
+progress { width: 100%; height: 6px; accent-color: var(--accent); }
+a { color: var(--accent); }
+[hidden] { display: none !important; }
 #unpaired { display: none; padding: 24px 16px; text-align: center; color: var(--muted); }
 body.unpaired #unpaired { display: block; }
 body.unpaired main, body.unpaired #search { display: none; }
@@ -67,6 +78,19 @@ body.unpaired main, body.unpaired #search { display: none; }
 <main>
   <h2 id="results-head">Library</h2>
   <ul id="results"><li class="empty">Type to search your songs.</li></ul>
+  <div id="enchor-offer" class="offer" hidden>
+    <button id="enchor-search" class="secondary" type="button">Search enchor.us</button>
+  </div>
+  <section id="enchor" hidden>
+    <h2 id="enchor-head">enchor.us</h2>
+    <ul id="enchor-results"></ul>
+    <div class="offer"><button id="enchor-more" class="secondary" type="button" hidden>More results</button></div>
+    <p class="hint">Charts come from <a href="https://www.enchor.us/" target="_blank" rel="noopener">enchor.us</a>, a free, donation-funded community service. Download only what you'll play.</p>
+  </section>
+  <section id="downloads" hidden>
+    <h2>Downloads</h2>
+    <ul id="download-list"></ul>
+  </section>
   <h2>Setlist</h2>
   <ul id="setlist"><li class="empty">Loading…</li></ul>
   <p class="hint">Queued songs go to the end of Clone Hero's setlist. Start the setlist in the game, or let a running setlist continue.</p>
@@ -126,6 +150,7 @@ const friendly = {
   scanning: "A scan is already running.",
   not_found: "That song isn't in the library anymore. Rescan and search again.",
   not_ready: "Encore isn't ready yet. Try again in a moment.",
+  unknown_chart: "Search enchor.us again, then tap Download.",
 };
 const explain = e => friendly[e && e.result] || (e && e.message) || "Something went wrong.";
 
@@ -172,6 +197,10 @@ async function search() {
   const q = $("search").value.trim();
   const seq = ++searchSeq;
   const list = $("results");
+  if (q !== enchorQuery) $("enchor").hidden = true;
+  $("enchor-offer").hidden = !q;
+  $("enchor-search").textContent = `Search enchor.us for “${q}”`;
+  $("enchor-search").className = "secondary";
   if (!q) {
     $("results-head").textContent = "Library";
     list.innerHTML = '<li class="empty">Type to search your songs.</li>';
@@ -184,7 +213,8 @@ async function search() {
       ? `Showing ${data.songs.length} of ${data.total} matches` : `${data.total} match${data.total === 1 ? "" : "es"}`;
     list.replaceChildren();
     if (!data.songs.length) {
-      list.innerHTML = '<li class="empty">Not in the library.</li>';
+      list.innerHTML = '<li class="empty">Not in your library.</li>';
+      $("enchor-search").className = "";
       return;
     }
     for (const song of data.songs) {
@@ -218,6 +248,139 @@ async function queue(song, button) {
     toast(explain(e));
   }
 }
+
+// --- enchor.us: one request per tap, never while typing ---
+let enchorQuery = "", enchorPage = 1, enchorBusy = false;
+
+async function searchEnchor(page) {
+  const q = $("search").value.trim();
+  if (!q || enchorBusy) return;
+  enchorBusy = true;
+  $("enchor-search").disabled = $("enchor-more").disabled = true;
+  if (page === 1) {
+    enchorQuery = q;
+    $("enchor").hidden = false;
+    $("enchor-head").textContent = "enchor.us: searching…";
+    $("enchor-results").replaceChildren();
+  }
+  try {
+    const data = await api("POST", "enchor/search", { q, page });
+    enchorPage = page;
+    $("enchor-head").textContent = data.found ? `enchor.us: ${data.found} chart${data.found === 1 ? "" : "s"}` : "enchor.us";
+    if (!data.charts.length && page === 1) {
+      $("enchor-results").innerHTML = '<li class="empty">Nothing found on enchor.us either.</li>';
+    }
+    for (const chart of data.charts) $("enchor-results").append(chartItem(chart, data.libraryChecked));
+    $("enchor-more").hidden = data.found <= page * data.perPage;
+    if (page === 1) $("enchor").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) {
+    if (page === 1) {
+      $("enchor-head").textContent = "enchor.us";
+      $("enchor-results").innerHTML = "";
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = explain(e);
+      $("enchor-results").append(li);
+    } else toast(explain(e));
+  } finally {
+    enchorBusy = false;
+    $("enchor-search").disabled = $("enchor-more").disabled = false;
+  }
+}
+$("enchor-search").addEventListener("click", () => searchEnchor(1));
+$("enchor-more").addEventListener("click", () => searchEnchor(enchorPage + 1));
+
+function chartItem(chart, libraryChecked) {
+  const li = songItem(chart);
+  const meta = li.querySelector(".meta");
+  meta.textContent = [chart.artist, chart.charter && "charted by " + chart.charter, fmtLength(chart.length),
+    (chart.instruments || []).join(", ")].filter(Boolean).join(" · ");
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const lib = chart.inLibrary;
+  if (lib) {
+    const tag = document.createElement("div");
+    tag.className = "tag";
+    tag.textContent = lib.exact ? "In your library" : "You have this song (maybe another chart)";
+    li.querySelector(".song").append(tag);
+    const q = document.createElement("button");
+    q.type = "button";
+    q.textContent = lib.exact ? "Queue" : "Queue yours";
+    q.addEventListener("click", () => queue({ title: chart.title, checksum: lib.checksum }, q));
+    actions.append(q);
+  }
+  if (!lib || !lib.exact) {
+    const d = document.createElement("button");
+    d.type = "button";
+    d.textContent = lib ? "Download" : "Download & queue";
+    if (lib) d.className = "secondary";
+    d.addEventListener("click", () => download(chart, d));
+    actions.append(d);
+  }
+  if (!libraryChecked && !lib) {
+    const tag = document.createElement("div");
+    tag.className = "meta";
+    tag.textContent = "Couldn't check your library (is the game running?)";
+    li.querySelector(".song").append(tag);
+  }
+  li.append(actions);
+  return li;
+}
+
+async function download(chart, button) {
+  button.disabled = true;
+  try {
+    await api("POST", "enchor/download", { md5: chart.md5 });
+    button.textContent = "Started";
+    refreshDownloads();
+  } catch (e) {
+    button.disabled = false;
+    toast(explain(e));
+  }
+}
+
+let downloadsKey = "", downloadsActive = false;
+async function refreshDownloads() {
+  try {
+    const data = await api("GET", "downloads");
+    downloadsActive = data.jobs.some(j => ["downloading", "waiting", "scanning"].includes(j.state));
+    const key = JSON.stringify(data.jobs);
+    if (key === downloadsKey) return;
+    // Jobs that just reached "queued" since the last refresh (none on the first load).
+    const before = downloadsKey ? JSON.parse(downloadsKey) : null;
+    const newlyQueued = before ? data.jobs.filter(j => j.state === "queued" &&
+      !before.some(b => b.id === j.id && b.state === "queued")) : [];
+    downloadsKey = key;
+    $("downloads").hidden = !data.jobs.length;
+    const list = $("download-list");
+    list.replaceChildren();
+    for (const j of data.jobs) {
+      const li = songItem({ title: j.title, artist: j.artist });
+      li.querySelector(".meta").textContent = [j.artist, j.charter && "charted by " + j.charter].filter(Boolean).join(" · ");
+      const state = document.createElement("div");
+      state.className = "state " + j.state;
+      let text = j.message;
+      if (j.state === "downloading" && j.bytes) {
+        const mb = (j.bytes / 1048576).toFixed(1);
+        text = j.total ? `Downloading… ${mb} of ${(j.total / 1048576).toFixed(1)} MB` : `Downloading… ${mb} MB`;
+      }
+      state.textContent = text;
+      li.querySelector(".song").append(state);
+      if (j.state === "downloading" && j.total) {
+        const p = document.createElement("progress");
+        p.max = j.total;
+        p.value = j.bytes;
+        li.querySelector(".song").append(p);
+      }
+      list.append(li);
+    }
+    if (newlyQueued.length) {
+      toast(`Downloaded and queued “${newlyQueued[0].title}” at position ${newlyQueued[0].position}.`);
+      refreshSetlist();
+    }
+  } catch (e) {}
+}
+setInterval(() => { if (downloadsActive && document.visibilityState === "visible") refreshDownloads(); }, 1500);
 
 // --- Setlist and status ---
 let setlistKey = "";
@@ -283,6 +446,7 @@ function poll() {
   if (document.visibilityState !== "visible") return;
   refreshStatus();
   refreshSetlist();
+  if (!downloadsActive) refreshDownloads();
 }
 document.addEventListener("visibilitychange", poll);
 setInterval(poll, 4000);

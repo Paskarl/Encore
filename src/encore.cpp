@@ -558,6 +558,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(inst);
+        // UnityCrashHandler64.exe sits in the same folder and loads this version.dll too. Only the
+        // game itself has UnityPlayer.dll (the module importing us) mapped; elsewhere stay a plain
+        // proxy so the crash handler does not overwrite encore.log or start a bootstrap thread.
+        if (!GetModuleHandleW(L"UnityPlayer.dll"))
+            return TRUE;
         wchar_t path[MAX_PATH];
         GetModuleFileNameW(nullptr, path, MAX_PATH);
         wchar_t* slash = wcsrchr(path, L'\\');

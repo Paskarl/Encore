@@ -8,7 +8,7 @@
 
   This script copies only the requested RVA ranges (each widened to 4 KB boundaries) into a new PE
   that keeps the original image base, so every address in the decompiled output matches the real
-  game. Every method from the Encore address map (encore_methods.tsv, written with ENCORE_DUMP=1)
+  game. Every method from the Pick address map (pick_methods.tsv, written with PICK_DUMP=1)
   that falls inside a range becomes a named export. That gives Ghidra function starts and readable
   labels. Obfuscated names are replaced by short ids (o0, o1, ...); the mapping is written to
   <Out>.names.txt.
@@ -16,7 +16,7 @@
   Calls to code outside the slice show up as func_0x<address>; look those up in the address map.
 
 .EXAMPLE
-  .\make-slice.ps1 -Path "C:\...\Clone Hero\GameAssembly.dll" -MethodMap "C:\...\Clone Hero\encore_methods.tsv" `
+  .\make-slice.ps1 -Path "C:\...\Clone Hero\GameAssembly.dll" -MethodMap "C:\...\Clone Hero\pick_methods.tsv" `
       -Out "$env:TEMP\slice.dll" -Range 88000-8f000,1b4000-1bc000
 #>
 param(

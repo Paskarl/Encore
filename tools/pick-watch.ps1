@@ -1,21 +1,21 @@
 <#
 .SYNOPSIS
-  Watch Clone Hero song folders and start an Encore rescan when charts are added or changed.
+  Watch Clone Hero song folders and start a Pick rescan when charts are added or changed.
 
 .DESCRIPTION
   Watches the given folders (recursively) for changes to song.ini, notes.chart, notes.mid and
   .sng files, and for new or renamed folders that contain them. After a burst of changes it waits
   until nothing has changed for -QuietSeconds (so a downloader can finish extracting), then calls
-  POST /rescan on Encore.
+  POST /rescan on Pick.
 
   If the song list is not open (409 not_in_song_list), the rescan stays pending and the watcher
   polls GET /status until the song list is open, then retries. If a scan is already running
-  (409 scanning), it retries after that scan. If Encore is not reachable or not ready, it retries
+  (409 scanning), it retries after that scan. If Pick is not reachable or not ready, it retries
   every few seconds. Stop the watcher with Ctrl+C.
 
 .EXAMPLE
-  .\encore-watch.ps1
-  .\encore-watch.ps1 -Path 'D:\Songs', 'E:\More Songs' -QuietSeconds 10
+  .\pick-watch.ps1
+  .\pick-watch.ps1 -Path 'D:\Songs', 'E:\More Songs' -QuietSeconds 10
 #>
 param(
   [string[]]$Path = @(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Clone Hero\Songs'),
@@ -29,8 +29,8 @@ $chartFiles = @('song.ini', 'notes.chart', 'notes.mid')
 
 function Log([string]$Text) { Write-Host ('{0:HH:mm:ss} {1}' -f (Get-Date), $Text) }
 
-# Returns the parsed JSON body for success and error statuses alike, or $null if Encore is not
-# reachable (game not running, or Encore not installed).
+# Returns the parsed JSON body for success and error statuses alike, or $null if Pick is not
+# reachable (game not running, or Pick not installed).
 function Call([string]$Method, [string]$Path) {
   try {
     $r = Invoke-WebRequest -UseBasicParsing -Method $Method -Uri "$base$Path" -TimeoutSec 10
@@ -74,7 +74,7 @@ try {
     $w.InternalBufferSize = 65536
     $w.NotifyFilter = [IO.NotifyFilters]'FileName, DirectoryName, LastWrite, Size'
     foreach ($evt in 'Created', 'Changed', 'Deleted', 'Renamed', 'Error') {
-      $id = "encore-watch-$($watchers.Count)-$evt"
+      $id = "pick-watch-$($watchers.Count)-$evt"
       Register-ObjectEvent -InputObject $w -EventName $evt -SourceIdentifier $id | Out-Null
       $sourceIds += $id
     }
@@ -133,7 +133,7 @@ try {
       switch ($result) {
         'not_in_song_list' { Log 'rescan pending: waiting for the song list to be opened' }
         'scanning'         { Log 'rescan pending: waiting for the running scan to finish' }
-        'unreachable'      { Log "rescan pending: Encore not reachable at $base (is Clone Hero running?)" }
+        'unreachable'      { Log "rescan pending: Pick not reachable at $base (is Clone Hero running?)" }
         default            { Log "rescan pending: $($r.Code) $result, retrying" }
       }
       $waitingFor = $result

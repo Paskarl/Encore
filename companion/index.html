@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14161a">
-<title>Encore</title>
+<title>Pick</title>
 <style>
 :root {
   --bg: #f4f5f7; --panel: #ffffff; --text: #16181d; --muted: #646a75; --line: #e1e4e9;
@@ -65,7 +65,7 @@ body.unpaired main, body.unpaired #search { display: none; }
 <body>
 <header>
   <div class="bar">
-    <h1>Encore</h1>
+    <h1>Pick</h1>
     <span id="status" class="pill">…</span>
     <button id="rescan" class="secondary" type="button">Rescan</button>
   </div>
@@ -74,12 +74,12 @@ body.unpaired main, body.unpaired #search { display: none; }
 
 <div id="unpaired">
   <p><strong>This phone isn't paired yet.</strong></p>
-  <p>In Clone Hero's main menu, choose <strong>Encore</strong> and enter the code it shows:</p>
+  <p>In Clone Hero's main menu, choose <strong>Pick</strong> and enter the code it shows:</p>
   <form id="pair-form" class="offer">
     <input id="pair-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456" aria-label="Pairing code">
     <button type="submit">Pair</button>
   </form>
-  <p>Or scan the QR code in the Encore companion window on the PC (or open <code>http://localhost:47322/pair</code> there and scan it).</p>
+  <p>Or scan the QR code in the Pick companion window on the PC (or open <code>http://localhost:47322/pair</code> there and scan it).</p>
 </div>
 
 <main>
@@ -114,7 +114,7 @@ const $ = id => document.getElementById(id);
 (function takePairing() {
   const m = location.hash.match(/pair=([0-9a-f]{32})/);
   if (m) {
-    try { localStorage.setItem("encoreToken", m[1]); } catch (e) {}
+    try { localStorage.setItem("pickToken", m[1]); } catch (e) {}
     window.__token = m[1];
     history.replaceState(null, "", location.pathname);
   }
@@ -135,13 +135,14 @@ $("pair-form").addEventListener("submit", async ev => {
     toast(data.message || "Pairing failed.");
     return;
   }
-  try { localStorage.setItem("encoreToken", data.token); } catch (e) {}
+  try { localStorage.setItem("pickToken", data.token); } catch (e) {}
   window.__token = data.token;
   poll();
 });
 function token() {
   if (window.__token) return window.__token;
-  try { return localStorage.getItem("encoreToken") || ""; } catch (e) { return ""; }
+  // "encoreToken": phones paired before the rename from Encore to Pick.
+  try { return localStorage.getItem("pickToken") || localStorage.getItem("encoreToken") || ""; } catch (e) { return ""; }
 }
 
 async function api(method, path, body) {
@@ -168,7 +169,7 @@ async function api(method, path, body) {
 }
 
 const friendly = {
-  encore_offline: "Clone Hero (with Encore) isn't running on the PC.",
+  pick_offline: "Clone Hero (with Pick) isn't running on the PC.",
   not_in_song_list: "Open the song list in Clone Hero (or play a setlist), then try again.",
   quickplay: "A single song is playing. Queue from the song list or during a setlist.",
   practice: "Practice mode has no setlist.",
@@ -176,7 +177,7 @@ const friendly = {
   timeout: "The game didn't answer in time. Try again.",
   scanning: "A scan is already running.",
   not_found: "That song isn't in the library anymore. Rescan and search again.",
-  not_ready: "Encore isn't ready yet. Try again in a moment.",
+  not_ready: "Pick isn't ready yet. Try again in a moment.",
   unknown_chart: "Search enchor.us again, then tap Download.",
 };
 const explain = e => friendly[e && e.result] || (e && e.message) || "Something went wrong.";
@@ -457,7 +458,7 @@ async function refreshStatus() {
     else if (s.songList) setStatus("ok", "Song list");
     else setStatus("ok", "Game running");
   } catch (e) {
-    if (e && e.result === "encore_offline") setStatus("bad", "Game offline");
+    if (e && e.result === "pick_offline") setStatus("bad", "Game offline");
     else if (e && e.result !== "network" && e.result !== "unpaired") setStatus("warn", "Busy");
   }
 }

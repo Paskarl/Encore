@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Example client for Encore's song queue: add a song to the setlist of a running Clone Hero, or
+  Example client for Pick's song queue: add a song to the setlist of a running Clone Hero, or
   show the setlist.
 
 .DESCRIPTION
@@ -12,10 +12,10 @@
   GET /setlist returns the current setlist.
 
 .EXAMPLE
-  .\encore-queue.ps1 -Checksum 0123456789abcdef0123456789abcdef
-  .\encore-queue.ps1 -Title 'Through the Fire and Flames' -Artist 'DragonForce'
-  .\encore-queue.ps1 -Title 'Soulless 4' -Speed 80
-  .\encore-queue.ps1 -List
+  .\pick-queue.ps1 -Checksum 0123456789abcdef0123456789abcdef
+  .\pick-queue.ps1 -Title 'Through the Fire and Flames' -Artist 'DragonForce'
+  .\pick-queue.ps1 -Title 'Soulless 4' -Speed 80
+  .\pick-queue.ps1 -List
 #>
 param(
     [string]$Checksum,
@@ -41,7 +41,7 @@ function Call([string]$Method, [string]$Path, [string]$Body) {
     return [pscustomobject]@{ Code = [int]$r.StatusCode; Body = $text | ConvertFrom-Json }
   } catch [System.Net.WebException] {
     $resp = $_.Exception.Response
-    if (-not $resp) { throw "Encore is not reachable at $base (is Clone Hero running with Encore installed?)" }
+    if (-not $resp) { throw "Pick is not reachable at $base (is Clone Hero running with Pick installed?)" }
     $text = $_.ErrorDetails.Message
     if (-not $text) { $text = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd() }
     return [pscustomobject]@{ Code = [int]$resp.StatusCode; Body = $text | ConvertFrom-Json }

@@ -98,10 +98,10 @@ static void HandleRescan(SOCKET s)
         Respond(s, 409, "{\"result\":\"not_in_song_list\",\"message\":\"open the song list and try again\"}");
         break;
     case kRescanFailed:
-        Respond(s, 500, "{\"result\":\"failed\",\"message\":\"scan objects not found, see encore.log\"}");
+        Respond(s, 500, "{\"result\":\"failed\",\"message\":\"scan objects not found, see pick.log\"}");
         break;
-    default: // kRescanNotReady, or 0 if the message did not reach Encore's window procedure
-        Respond(s, 503, "{\"result\":\"not_ready\",\"message\":\"Encore is not ready, see encore.log\"}");
+    default: // kRescanNotReady, or 0 if the message did not reach Pick's window procedure
+        Respond(s, 503, "{\"result\":\"not_ready\",\"message\":\"Pick is not ready, see pick.log\"}");
         break;
     }
 }
@@ -136,7 +136,7 @@ static void HandleJsonCommand(SOCKET s, WPARAM cmd, JsonRequest* req, const char
         // The window procedure did not take the request (returns 1 when it did), so it never
         // releases its reference.
         ReleaseRequest(req);
-        Respond(s, 503, "{\"result\":\"not_ready\",\"message\":\"Encore is not ready, see encore.log\"}");
+        Respond(s, 503, "{\"result\":\"not_ready\",\"message\":\"Pick is not ready, see pick.log\"}");
     }
     else
         Respond(s, req->httpStatus, req->body);

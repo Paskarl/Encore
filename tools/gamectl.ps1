@@ -3,7 +3,7 @@
   Test helper: post a key to Clone Hero's Unity window, or save a capture of it as PNG.
 
 .DESCRIPTION
-  Posted WM_KEYDOWN messages reach Encore's window procedure (good enough to test the F5 handler),
+  Posted WM_KEYDOWN messages reach Pick's window procedure (good enough to test the F5 handler),
   but not the game itself: Clone Hero reads input through Rewired/raw input, so menus cannot be
   navigated this way. PrintWindow captures of the DirectX surface may come out black.
 

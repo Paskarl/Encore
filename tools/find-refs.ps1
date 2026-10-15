@@ -15,7 +15,7 @@
   bytes. Use -Range to limit the scan to the functions of interest.
 
 .EXAMPLE
-  .\find-refs.ps1 -Path "C:\...\GameAssembly.dll" -Rva 0x3c9d098 -MethodMap encore_methods.tsv -Range 15d000-164000
+  .\find-refs.ps1 -Path "C:\...\GameAssembly.dll" -Rva 0x3c9d098 -MethodMap pick_methods.tsv -Range 15d000-164000
 #>
 param(
     [Parameter(Mandatory)] [string]$Path,

@@ -5,15 +5,15 @@
 .DESCRIPTION
   This is how the real SongScan.StartScan was told apart from its obfuscator decoys: only the real one
   is called from other classes. Attribute each call site to a method with the address map that
-  Encore writes when ENCORE_DUMP=1 (encore_methods.tsv): the containing method is the closest entry
+  Pick writes when PICK_DUMP=1 (pick_methods.tsv): the containing method is the closest entry
   at or below the site.
 
   This is a plain byte scan, so a hit can in rare cases be data that looks like an instruction.
-  Encore itself additionally filters sites through the x64 unwind tables.
+  Pick itself additionally filters sites through the x64 unwind tables.
 
 .EXAMPLE
   .\find-callers.ps1 -Path "C:\...\Clone Hero\GameAssembly.dll" -Rva 0x1b4fd0,0x1b57d0,0x1b5910,0x1b5c10 `
-      -MethodMap "C:\...\Clone Hero\encore_methods.tsv"
+      -MethodMap "C:\...\Clone Hero\pick_methods.tsv"
 #>
 param(
     [Parameter(Mandatory)] [string]$Path,

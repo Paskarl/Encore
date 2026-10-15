@@ -11,7 +11,7 @@ static const unsigned short kCompanionPort = 47322;
 struct CompanionResult
 {
     bool ok = false;
-    bool started = false; // Encore started the companion (it wasn't running)
+    bool started = false; // Pick started the companion (it wasn't running)
     std::string url;      // companion address on the LAN, e.g. http://192.168.1.20:47322/
     std::string code;     // 6-digit pairing code
     int expiresMinutes = 0;
@@ -19,4 +19,4 @@ struct CompanionResult
 };
 
 // Returns false (and does nothing) while a previous request is still running.
-bool RequestCompanionPairing(HWND wnd, UINT resultMsg, unsigned short encorePort);
+bool RequestCompanionPairing(HWND wnd, UINT resultMsg, unsigned short pickPort);

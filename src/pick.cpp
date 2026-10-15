@@ -1,10 +1,10 @@
-// Encore: rescan songs from Clone Hero's song list.
+// Pick: rescan songs from Clone Hero's song list.
 // Runs inside the game (loaded through the version.dll proxy), subclasses the Unity window
 // so all IL2CPP calls happen on the Unity main thread, and starts a song rescan when F5 is
 // pressed in the song list or another application sends POST /rescan to the loopback HTTP
 // listener (trigger_server.cpp). The listener can also queue songs into the game's setlist
-// (POST /queue). Encore also adds an "Encore" main-menu entry that starts the companion. With
-// ENCORE_DUMP=1 it also dumps the analysed classes.
+// (POST /queue). Pick also adds a "Pick" main-menu entry that starts the companion. With
+// PICK_DUMP=1 it also dumps the analysed classes.
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
@@ -21,7 +21,7 @@ static HWND g_unityWnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 static bool g_initDone = false;
 static const UINT WM_POC_INIT = WM_APP + 0x4C48;
-static const UINT WM_ENCORE_TRIGGER = WM_APP + 0x4C49; // wParam = TriggerCommand
+static const UINT WM_PICK_TRIGGER = WM_APP + 0x4C49; // wParam = TriggerCommand
 static const unsigned short kDefaultPort = 47321;
 
 void Log(const char* fmt, ...)
@@ -84,7 +84,7 @@ static void DumpClass(Il2CppClass* k)
     }
 }
 
-// Class name substrings to dump. ENCORE_DUMP_FILTER (comma-separated) replaces the default, which
+// Class name substrings to dump. PICK_DUMP_FILTER (comma-separated) replaces the default, which
 // covers the classes analysed for the rescan; "*" dumps every class (needed to find obfuscated
 // classes by their field types).
 static bool NameMatches(const char* name)
@@ -92,7 +92,7 @@ static bool NameMatches(const char* name)
     static std::vector<std::string> filters = [] {
         std::vector<std::string> list;
         char buf[1024];
-        DWORD n = GetEnvironmentVariableA("ENCORE_DUMP_FILTER", buf, sizeof(buf));
+        DWORD n = GetEnvironmentVariableA("PICK_DUMP_FILTER", buf, sizeof(buf));
         std::string spec = (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : "Scan,SongSelect,SongLibrary,Rescan";
         size_t start = 0;
         while (start <= spec.size())
@@ -395,7 +395,7 @@ static Il2CppObject* FindActiveInstance(Il2CppClass* k)
 // HTTP trigger; source names the trigger in the log. Outside the song list the request is
 // refused: the scan coroutine would also run from other menus, but during gameplay or a scene
 // load that is not safe, and the list only refreshes when a song list is open anyway.
-// A song scan empties the setlist (at scan start). Rescans started by Encore save it first and
+// A song scan empties the setlist (at scan start). Rescans started by Pick save it first and
 // put it back when the scan has finished; see "Setlist across rescans" below.
 static void SaveSetlistForRescan();
 static void RestoreSetlistIfScanDone();
@@ -404,7 +404,7 @@ static RescanResult TriggerRescanFromSongList(const char* source)
 {
     if (!g_initDone || !g_refs.ok)
     {
-        Log("%s ignored: Encore is not ready", source);
+        Log("%s ignored: Pick is not ready", source);
         return kRescanNotReady;
     }
     Il2CppObject* songSelect = FindActiveInstance(g_refs.songSelect);
@@ -937,7 +937,7 @@ static Il2CppObject* AllSongs()
 //
 // The scan clears the setlist lists (and the setlist panel) as soon as it starts; measured on
 // v1.1.0.6142 with POST /rescan: 2 songs before, 0 within 25 ms, still 0 after the scan. Rescans
-// started by Encore (F5, /rescan, so also the folder watcher and the companion's downloads) save
+// started by Pick (F5, /rescan, so also the folder watcher and the companion's downloads) save
 // the setlist before StartScan and add the songs back, found again by checksum, once isScanning
 // is false. The restore runs from a timer and before every /status, /queue and /setlist request,
 // so a song queued right after a rescan lands behind the restored ones.
@@ -1039,7 +1039,7 @@ static void HandleSetlist(JsonRequest* req)
     RestoreSetlistIfScanDone();
     QueueRefs& q = g_queue;
     if (!g_initDone || !q.ok)
-        return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
+        return ReplyResult(req, 503, "not_ready", "Pick is not ready, see pick.log");
     Il2CppObject* gv = GlobalVars();
     Il2CppObject* songs = StaticObject(q.setSongs);
     Il2CppObject* speeds = StaticObject(q.setSpeeds);
@@ -1184,7 +1184,7 @@ static std::vector<std::wstring> SearchWords(const std::wstring& text)
 static void HandleLibrary(JsonRequest* req)
 {
     if (!g_initDone || !g_queue.ok)
-        return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
+        return ReplyResult(req, 503, "not_ready", "Pick is not ready, see pick.log");
     RefreshLibraryCache();
     const std::vector<LibrarySong>& songs = g_library.songs;
     std::wstring query = Lower(Wide(req->query));
@@ -1287,7 +1287,7 @@ static void HandleQueue(JsonRequest* req)
 {
     QueueRefs& q = g_queue;
     if (!g_initDone || !g_refs.ok || !q.ok)
-        return ReplyResult(req, 503, "not_ready", "Encore is not ready, see encore.log");
+        return ReplyResult(req, 503, "not_ready", "Pick is not ready, see pick.log");
     RestoreSetlistIfScanDone();
     Il2CppObject* gv = GlobalVars();
     if (!gv)
@@ -1305,12 +1305,12 @@ static void HandleQueue(JsonRequest* req)
     Il2CppObject* speeds = StaticObject(q.setSpeeds);
     Il2CppObject* strings = StaticObject(q.setStrings);
     if (!songs || !speeds || !strings)
-        return ReplyResult(req, 500, "failed", "setlist lists are null, see encore.log");
+        return ReplyResult(req, 500, "failed", "setlist lists are null, see pick.log");
     int count = ListCount(songs);
     if (ListCount(speeds) != count || ListCount(strings) != count)
     {
         Log("queue refused: setlist lists out of sync (%d/%d/%d)", count, ListCount(speeds), ListCount(strings));
-        return ReplyResult(req, 500, "failed", "setlist lists out of sync, see encore.log");
+        return ReplyResult(req, 500, "failed", "setlist lists out of sync, see pick.log");
     }
     const char* mode;
     if (songSelect)
@@ -1360,7 +1360,7 @@ static void HandleQueue(JsonRequest* req)
     {
         Il2CppObject* menu = GetField<Il2CppObject*>(songSelect, q.ssSetlistMenu);
         if (!menu)
-            return ReplyResult(req, 500, "failed", "SongSelect.setlistMenu is null, see encore.log");
+            return ReplyResult(req, 500, "failed", "SongSelect.setlistMenu is null, see pick.log");
         void* args[] = {song, &speed, str};
         Invoke(q.setlistAdd, menu, args);
         mode = "song_list";
@@ -1372,7 +1372,7 @@ static void HandleQueue(JsonRequest* req)
         if (!ListAdd(speeds, &speed) || !ListAdd(strings, str) || !ListAdd(songs, song))
         {
             Log("queue: List.Add failed, lists now %d/%d/%d", ListCount(songs), ListCount(speeds), ListCount(strings));
-            return ReplyResult(req, 500, "failed", "appending to the setlist failed, see encore.log");
+            return ReplyResult(req, 500, "failed", "appending to the setlist failed, see pick.log");
         }
         if (songSelect)
             mode = "song_list_lists"; // SetlistMenu.Add not identified: panel not refreshed
@@ -1382,7 +1382,7 @@ static void HandleQueue(JsonRequest* req)
     {
         Log("queue: unexpected setlist sizes after adding: %d/%d/%d (was %d)", newCount, ListCount(speeds),
             ListCount(strings), count);
-        return ReplyResult(req, 500, "failed", "setlist did not grow as expected, see encore.log");
+        return ReplyResult(req, 500, "failed", "setlist did not grow as expected, see pick.log");
     }
     int setlistIndex = GetField<int>(gv, q.gvSetlistIndex);
     if (strcmp(mode, "setlist_running") == 0)
@@ -1397,29 +1397,29 @@ static void HandleQueue(JsonRequest* req)
 }
 
 // ---------------------------------------------------------------------------------------------
-// "Encore" entry in the main menu (docs/ANALYSIS.md section 8).
+// "Pick" entry in the main menu (docs/ANALYSIS.md section 8).
 //
 //   - BaseMenu draws menuStrings into textObjects/backgroundObjects. Its visible count is
 //     min(textObjects.Length, menuStrings.Length) and the rest scrolls; both ints are obfuscated
-//     fields, the 3rd and 4th Int32 field of BaseMenu (max scroll, visible count). Encore checks
+//     fields, the 3rd and 4th Int32 field of BaseMenu (max scroll, visible count). Pick checks
 //     their values against that formula on the live menu before it changes anything.
 //   - Confirming an entry calls a virtual BaseMenu method that MainMenu overrides. The override
 //     reads the selected menu string (BaseMenu's only `string X()` method) and switches on it;
 //     an unknown string does nothing. It is the only MainMenu method that calls that getter and
-//     it is only reached through MainMenu's vtable (no direct callers), so Encore replaces the
+//     it is only reached through MainMenu's vtable (no direct callers), so Pick replaces the
 //     method pointer in that vtable slot with a wrapper (a data change, no code patching): the
-//     wrapper handles "Encore" and passes everything else to the original.
+//     wrapper handles "Pick" and passes everything else to the original.
 //   - The dialog is MainMenu.confirmMenu (ConfirmationMenu). Its "show" method takes
 //     (title, option 1, option 2, on option 1, on option 2, body); title and options go through
 //     the game's text lookup, which returns the key itself for unknown keys. ConfirmationMenu has
 //     several copies of it (obfuscator); the real one is the only one in its vtable.
-//   - The text lookup also handles the menu label: "Encore" is not a key, so it is shown as is.
+//   - The text lookup also handles the menu label: "Pick" is not a key, so it is shown as is.
 // ---------------------------------------------------------------------------------------------
 
-static const UINT WM_ENCORE_COMPANION = WM_APP + 0x4C4A; // lParam = CompanionResult*
+static const UINT WM_PICK_COMPANION = WM_APP + 0x4C4A; // lParam = CompanionResult*
 static const UINT_PTR kMenuTimer = 0x4C4B;
-static const wchar_t kEntryLabel[] = L"Encore";
-static const char kEntryLabelUtf8[] = "Encore";
+static const wchar_t kEntryLabel[] = L"Pick";
+static const char kEntryLabelUtf8[] = "Pick";
 static const char kEntryTip[] = "Start the phone companion and pair a phone";
 static const wchar_t kInsertAfter[] = L"Practice"; // menu key the entry goes after; appended if absent
 
@@ -1641,7 +1641,7 @@ static bool ResolveMenuRefs(const Il2CppImage* game)
     if (!r.mainMenu || !r.baseMenu || !r.confirmClass || il2cpp_class_get_parent(r.mainMenu) != r.baseMenu ||
         il2cpp_class_get_parent(r.confirmClass) != r.baseMenu)
     {
-        Log("menu: MainMenu/BaseMenu/ConfirmationMenu not found or hierarchy changed, no Encore menu entry");
+        Log("menu: MainMenu/BaseMenu/ConfirmationMenu not found or hierarchy changed, no Pick menu entry");
         return false;
     }
     r.menuStrings = il2cpp_class_get_field_from_name(r.baseMenu, "menuStrings");
@@ -1806,13 +1806,13 @@ static bool ResolveMenuRefs(const Il2CppImage* game)
         r.baseConfirm ? "overrides BaseMenu" : "no BaseMenu method of that name",
         static_cast<unsigned long long>(Rva(r.confirm ? il2cpp_method_pointer(r.confirm) : nullptr)), r.showCandidates.size(),
         r.instantiate, r.instantiate1, r.setParent, r.inChildren,
-        r.resolved ? "ok" : "FAILED, no Encore menu entry; missing: ", missing.c_str());
+        r.resolved ? "ok" : "FAILED, no Pick menu entry; missing: ", missing.c_str());
     return r.resolved;
 }
 
-static void MenuEncoreSelected(Il2CppObject* menu);
+static void MenuPickSelected(Il2CppObject* menu);
 
-static bool SelectedIsEncore(Il2CppObject* menu)
+static bool SelectedIsPick(Il2CppObject* menu)
 {
     Il2CppString* s = reinterpret_cast<Il2CppString*>(Invoke(g_menu.selectedString, menu, nullptr));
     return s && WideString(s) == kEntryLabel;
@@ -1822,9 +1822,9 @@ static bool SelectedIsEncore(Il2CppObject* menu)
 // Update, like the original.
 static void HookedConfirm(Il2CppObject* self, const MethodInfo* method)
 {
-    if (!g_menu.disabled && SelectedIsEncore(self))
+    if (!g_menu.disabled && SelectedIsPick(self))
     {
-        MenuEncoreSelected(self);
+        MenuPickSelected(self);
         return;
     }
     g_origConfirm(self, method);
@@ -1861,7 +1861,7 @@ static bool InstallMenuHook()
         static_cast<long long>(off), static_cast<long long>(baseOff), writable, called, r.showCandidates.size());
     if (!slot || off != baseOff || !writable || called != 1)
     {
-        Log("menu: vtable check failed, no Encore menu entry");
+        Log("menu: vtable check failed, no Pick menu entry");
         r.showDialog = nullptr;
         return false;
     }
@@ -1943,7 +1943,7 @@ static Il2CppObject* ChildComponent(Il2CppObject* component, Il2CppObject* array
     return Invoke(g_menu.inChildren, component, args);
 }
 
-static bool HasEncoreEntry(Il2CppObject* strings)
+static bool HasPickEntry(Il2CppObject* strings)
 {
     for (int i = 0; i < ArrayLength(strings); ++i)
         if (WideString(reinterpret_cast<Il2CppString*>(ArrayItem(strings, i))) == kEntryLabel)
@@ -2021,7 +2021,7 @@ static void SyncClonedEntry(Il2CppObject* menu)
         PlaceAfter(g_clone.bg, g_clone.srcBg, g_clone.srcBgBefore);
 }
 
-// Appends "Encore" to a live main menu. Uses a spare text object if there is one, otherwise
+// Appends "Pick" to a live main menu. Uses a spare text object if there is one, otherwise
 // clones the last entry's text and background.
 static void AddMenuEntry(Il2CppObject* menu)
 {
@@ -2030,7 +2030,7 @@ static void AddMenuEntry(Il2CppObject* menu)
     Il2CppObject* tips = GetField<Il2CppObject*>(menu, r.tipStrings);
     Il2CppObject* texts = GetField<Il2CppObject*>(menu, r.textObjects);
     Il2CppObject* bgs = GetField<Il2CppObject*>(menu, r.backgrounds);
-    if (!strings || HasEncoreEntry(strings) || menu == g_menuRefused)
+    if (!strings || HasPickEntry(strings) || menu == g_menuRefused)
         return;
     int n = ArrayLength(strings), nt = ArrayLength(texts), nb = ArrayLength(bgs);
     int visible = GetField<int>(menu, r.visibleCount), maxScroll = GetField<int>(menu, r.maxScroll);
@@ -2153,7 +2153,7 @@ static void AddMenuEntry(Il2CppObject* menu)
         void* args[] = {Invoke(r.getText, ArrayItem(rows, i - 1), nullptr)};
         Invoke(r.setText, ArrayItem(rows, i), args);
     }
-    std::string label = GetField<bool>(menu, r.useUppercase) ? "ENCORE" : kEntryLabelUtf8;
+    std::string label = GetField<bool>(menu, r.useUppercase) ? "PICK" : kEntryLabelUtf8;
     void* textArgs[] = {il2cpp_string_new(label.c_str())};
     Invoke(r.setText, pos < shown ? ArrayItem(rows, pos) : text, textArgs);
     Log("menu: added \"%s\" as entry %d of %d (%s)", kEntryLabelUtf8, pos + 1, n + 1,
@@ -2185,18 +2185,18 @@ static void MenuTick()
 }
 
 
-// The player confirmed "Encore": start the companion (worker thread) and show the result later.
-static void MenuEncoreSelected(Il2CppObject* menu)
+// The player confirmed "Pick": start the companion (worker thread) and show the result later.
+static void MenuPickSelected(Il2CppObject* menu)
 {
     Il2CppObject* songScan = GetField<Il2CppObject*>(menu, g_menu.mmSongScan);
     if (songScan && GetField<bool>(songScan, g_refs.waitForFinish))
         return; // the game ignores menu input while the scan overlay shows, too
-    if (!RequestCompanionPairing(g_unityWnd, WM_ENCORE_COMPANION, TriggerPort()))
+    if (!RequestCompanionPairing(g_unityWnd, WM_PICK_COMPANION, TriggerPort()))
     {
-        Log("menu: Encore selected, pairing request already running");
+        Log("menu: Pick selected, pairing request already running");
         return;
     }
-    Log("menu: Encore selected, asking the companion for a pairing code");
+    Log("menu: Pick selected, asking the companion for a pairing code");
 }
 
 static bool MenuGameObjectActive(Il2CppObject* go)
@@ -2263,8 +2263,8 @@ static void ShowCompanionDialog(const CompanionResult& res)
             body += " The companion runs in its own window; close it to stop it.";
     }
     else
-        body = res.error + "\n\nSee encore.log and the README for how to set up the companion.";
-    std::string title = titleOnly ? "Encore companion\n" + body : "Encore companion";
+        body = res.error + "\n\nSee pick.log and the README for how to set up the companion.";
+    std::string title = titleOnly ? "Pick companion\n" + body : "Pick companion";
     void* args[] = {il2cpp_string_new(title.c_str()), il2cpp_string_new("OK"), nullptr, nullptr, nullptr,
                     titleOnly ? nullptr : il2cpp_string_new(body.c_str())};
     Invoke(r.showDialog, dialog, args);
@@ -2274,7 +2274,7 @@ static void ShowCompanionDialog(const CompanionResult& res)
 static bool DumpRequested()
 {
     wchar_t v[8];
-    return GetEnvironmentVariableW(L"ENCORE_DUMP", v, 8) > 0 && v[0] == L'1';
+    return GetEnvironmentVariableW(L"PICK_DUMP", v, 8) > 0 && v[0] == L'1';
 }
 
 static const UINT_PTR kInitTimer = 0x4C48;
@@ -2310,7 +2310,7 @@ static void OnMainThreadInit(HWND hwnd)
         wchar_t mapPath[MAX_PATH];
         GetModuleFileNameW(nullptr, mapPath, MAX_PATH);
         if (wchar_t* slash = wcsrchr(mapPath, L'\\'))
-            lstrcpyW(slash + 1, L"encore_methods.tsv");
+            lstrcpyW(slash + 1, L"pick_methods.tsv");
         DumpMethodMap(game, mapPath);
         Log("dump done");
     }
@@ -2322,10 +2322,10 @@ static void OnMainThreadInit(HWND hwnd)
             Log("queue ready: POST /queue adds a song to the setlist, GET /setlist shows it");
             LogLibraryState("startup");
         }
-        // ENCORE_MENU=0 leaves the main menu untouched.
+        // PICK_MENU=0 leaves the main menu untouched.
         wchar_t menuEnv[4];
-        if (GetEnvironmentVariableW(L"ENCORE_MENU", menuEnv, 4) > 0 && menuEnv[0] == L'0')
-            Log("menu: Encore menu entry off (ENCORE_MENU=0)");
+        if (GetEnvironmentVariableW(L"PICK_MENU", menuEnv, 4) > 0 && menuEnv[0] == L'0')
+            Log("menu: Pick menu entry off (PICK_MENU=0)");
         else if (ResolveMenuRefs(game))
             SetTimer(hwnd, kMenuTimer, 500, nullptr);
     }
@@ -2355,7 +2355,7 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     // Posted by the companion launcher thread.
-    if (msg == WM_ENCORE_COMPANION)
+    if (msg == WM_PICK_COMPANION)
     {
         auto* res = reinterpret_cast<CompanionResult*>(lp);
         ShowCompanionDialog(*res);
@@ -2363,7 +2363,7 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     // Sent by the HTTP listener thread with SendMessageTimeout; handled here on the main thread.
-    if (msg == WM_ENCORE_TRIGGER)
+    if (msg == WM_PICK_TRIGGER)
     {
         if (wp == kCmdRescan)
             return TriggerRescanFromSongList("http");
@@ -2380,7 +2380,7 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             else
                 HandleLibrary(req);
             if (req->httpStatus == 0)
-                ReplyResult(req, 500, "failed", "request not handled, see encore.log");
+                ReplyResult(req, 500, "failed", "request not handled, see pick.log");
             ReleaseRequest(req);
             return 1;
         }
@@ -2405,17 +2405,17 @@ static BOOL CALLBACK FindUnityWindow(HWND hwnd, LPARAM)
     return TRUE;
 }
 
-// ENCORE_PORT overrides the listener port; 0 turns the trigger interface off.
+// PICK_PORT overrides the listener port; 0 turns the trigger interface off.
 static unsigned short TriggerPort()
 {
     wchar_t v[16];
-    if (GetEnvironmentVariableW(L"ENCORE_PORT", v, 16) == 0)
+    if (GetEnvironmentVariableW(L"PICK_PORT", v, 16) == 0)
         return kDefaultPort;
     wchar_t* end = nullptr;
     long p = wcstol(v, &end, 10);
     if (end == v || *end || p < 0 || p > 65535)
     {
-        Log("http: invalid ENCORE_PORT, using %u", kDefaultPort);
+        Log("http: invalid PICK_PORT, using %u", kDefaultPort);
         return kDefaultPort;
     }
     return static_cast<unsigned short>(p);
@@ -2441,9 +2441,9 @@ static DWORD WINAPI Bootstrap(LPVOID)
         SetWindowLongPtrW(g_unityWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookWndProc)));
     PostMessageW(g_unityWnd, WM_POC_INIT, 0, 0);
     if (unsigned short port = TriggerPort())
-        StartTriggerServer(g_unityWnd, WM_ENCORE_TRIGGER, port);
+        StartTriggerServer(g_unityWnd, WM_PICK_TRIGGER, port);
     else
-        Log("http: trigger interface off (ENCORE_PORT=0)");
+        Log("http: trigger interface off (PICK_PORT=0)");
     return 0;
 }
 
@@ -2454,16 +2454,16 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         DisableThreadLibraryCalls(inst);
         // UnityCrashHandler64.exe sits in the same folder and loads this version.dll too. Only the
         // game itself has UnityPlayer.dll (the module importing us) mapped; elsewhere stay a plain
-        // proxy so the crash handler does not overwrite encore.log or start a bootstrap thread.
+        // proxy so the crash handler does not overwrite pick.log or start a bootstrap thread.
         if (!GetModuleHandleW(L"UnityPlayer.dll"))
             return TRUE;
         wchar_t path[MAX_PATH];
         GetModuleFileNameW(nullptr, path, MAX_PATH);
         wchar_t* slash = wcsrchr(path, L'\\');
         if (slash)
-            lstrcpyW(slash + 1, L"encore.log");
+            lstrcpyW(slash + 1, L"pick.log");
         g_log = _wfsopen(path, L"w", _SH_DENYWR);
-        Log("Encore loaded");
+        Log("Pick loaded");
         CloseHandle(CreateThread(nullptr, 0, Bootstrap, nullptr, 0, nullptr));
     }
     return TRUE;

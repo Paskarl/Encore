@@ -1,4 +1,4 @@
-// enchor.us client: chart search and .sng downloads, then rescan and queue through Encore.
+// enchor.us client: chart search and .sng downloads, then rescan and queue through Pick.
 //
 // enchor.us has no published API, terms or limits; this uses the same endpoints as Bridge
 // (github.com/Geomitron/Bridge) and is careful with them:
@@ -24,7 +24,7 @@ sealed class EnchorBusyException(string message, int retryAfterSeconds) : Except
 
 sealed class EnchorClient
 {
-    public const string UserAgent = "EncoreCompanion/0.2 (+https://github.com/Paskarl/Encore)";
+    public const string UserAgent = "PickCompanion/0.2 (+https://github.com/Paskarl/clonehero-pick)";
     const string SearchUrl = "https://api.enchor.us/search";
     const string FilesUrl = "https://files.enchor.us/";
     public const int PerPage = 10;
@@ -186,14 +186,14 @@ sealed class DownloadJob
     public DateTime Updated { get; set; } = DateTime.UtcNow;
 }
 
-sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, string songsDir)
+sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory pick, string songsDir)
 {
     readonly object _gate = new();
     readonly List<DownloadJob> _jobs = new();
     DownloadJob? _active;
     static readonly TimeSpan WaitLimit = TimeSpan.FromMinutes(30);
 
-    public string DownloadDir { get; } = Path.Combine(songsDir, "Encore Downloads");
+    public string DownloadDir { get; } = Path.Combine(songsDir, "Pick Downloads");
     readonly DownloadRecord _record = new();
 
     // Clone Hero checksum of a chart this companion downloaded before, if its file is still there.
@@ -304,7 +304,7 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, str
             string title = info.Metadata.GetValueOrDefault("name") is { Length: > 0 } n ? EnchorClient.StripTags(n) : chart.Title;
             string artist = info.Metadata.GetValueOrDefault("artist") is { Length: > 0 } a ? EnchorClient.StripTags(a) : chart.Artist;
 
-            var (_, existing) = await Encore.FindByChecksum(encore, info.Checksum, title, artist);
+            var (_, existing) = await Pick.FindByChecksum(pick, info.Checksum, title, artist);
             if (existing != null)
             {
                 File.Delete(part);
@@ -331,11 +331,11 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, str
         bool sawScan = false;
         while (DateTime.UtcNow < deadline)
         {
-            var (reachable, song) = await Encore.FindByChecksum(encore, checksum, title, artist);
-            var status = await Encore.Status(encore);
+            var (reachable, song) = await Pick.FindByChecksum(pick, checksum, title, artist);
+            var status = await Pick.Status(pick);
             if (song != null && !status.scanning)
             {
-                var (code, body) = await Encore.Call(encore, HttpMethod.Post, "queue", JsonSerializer.Serialize(new { checksum }));
+                var (code, body) = await Pick.Call(pick, HttpMethod.Post, "queue", JsonSerializer.Serialize(new { checksum }));
                 if (code == 200)
                 {
                     using var doc = JsonDocument.Parse(body);
@@ -343,8 +343,8 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, str
                     Set(job, "queued", $"Queued at position {job.Position}.");
                     return;
                 }
-                string result = code == Encore.Offline ? "encore_offline" : Result(body);
-                if (result is not ("not_in_song_list" or "loading" or "timeout" or "not_ready" or "encore_offline"))
+                string result = code == Pick.Offline ? "pick_offline" : Result(body);
+                if (result is not ("not_in_song_list" or "loading" or "timeout" or "not_ready" or "pick_offline"))
                 {
                     Set(job, "failed", $"Downloaded, but queueing failed ({result}). Queue it from the library search.");
                     return;
@@ -352,7 +352,7 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, str
                 Set(job, "waiting", "Downloaded. Open the song list (or play a setlist) to queue it.");
             }
             else if (!reachable || !status.ok)
-                Set(job, "waiting", "Downloaded. Waiting for Clone Hero with Encore.");
+                Set(job, "waiting", "Downloaded. Waiting for Clone Hero with Pick.");
             else if (status.scanning)
             {
                 sawScan = true;
@@ -365,7 +365,7 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, str
                     Set(job, "failed", "Downloaded, but Clone Hero didn't load the chart after a rescan. Check badsongs.txt in Documents\\Clone Hero.");
                     return;
                 }
-                var (code, _) = await Encore.Call(encore, HttpMethod.Post, "rescan");
+                var (code, _) = await Pick.Call(pick, HttpMethod.Post, "rescan");
                 if (code == 202)
                 {
                     ++rescans;
@@ -415,12 +415,12 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory encore, str
 }
 
 // Remembers which enchor.us charts were downloaded, and their Clone Hero checksums, in
-// %LOCALAPPDATA%\Encore\downloads.json, so a chart is never fetched twice.
+// %LOCALAPPDATA%\Pick\downloads.json, so a chart is never fetched twice.
 sealed class DownloadRecord
 {
     public record Entry(string Checksum, string File, DateTime Time);
 
-    static string FilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Encore", "downloads.json");
+    static string FilePath => Path.Combine(AppData.Dir, "downloads.json");
     readonly object _gate = new();
     readonly Dictionary<string, Entry> _entries;
 

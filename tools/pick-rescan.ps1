@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-  Example client for Encore's trigger interface: start a song rescan in a running Clone Hero,
+  Example client for Pick's trigger interface: start a song rescan in a running Clone Hero,
   or show its status.
 
 .DESCRIPTION
-  Encore listens on http://127.0.0.1:47321 (ENCORE_PORT overrides the port in the game's
+  Pick listens on http://127.0.0.1:47321 (PICK_PORT overrides the port in the game's
   environment). POST /rescan starts a full scan if the song list is open; GET /status reports
-  whether Encore is ready, the song list is open and a scan is running.
+  whether Pick is ready, the song list is open and a scan is running.
 
 .EXAMPLE
-  .\encore-rescan.ps1              # start a rescan
-  .\encore-rescan.ps1 -Status      # show status
-  .\encore-rescan.ps1 -Wait        # start a rescan and wait until it has finished
+  .\pick-rescan.ps1              # start a rescan
+  .\pick-rescan.ps1 -Status      # show status
+  .\pick-rescan.ps1 -Wait        # start a rescan and wait until it has finished
 #>
 param([switch]$Status, [switch]$Wait, [int]$Port = 47321)
 $ErrorActionPreference = 'Stop'
@@ -24,7 +24,7 @@ function Call([string]$Method, [string]$Path) {
     return [pscustomobject]@{ Code = [int]$r.StatusCode; Body = $r.Content | ConvertFrom-Json }
   } catch [System.Net.WebException] {
     $resp = $_.Exception.Response
-    if (-not $resp) { throw "Encore is not reachable at $base (is Clone Hero running with Encore installed?)" }
+    if (-not $resp) { throw "Pick is not reachable at $base (is Clone Hero running with Pick installed?)" }
     # PowerShell 5.1 has already read the error body into ErrorDetails.
     $text = $_.ErrorDetails.Message
     if (-not $text) { $text = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd() }

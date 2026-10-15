@@ -16,7 +16,7 @@ using System.Text;
 
 sealed class SngInfo
 {
-    public required string Checksum { get; init; } // upper-case hex, as Encore reports it
+    public required string Checksum { get; init; } // upper-case hex, as Pick reports it
     public required Dictionary<string, string> Metadata { get; init; }
 }
 

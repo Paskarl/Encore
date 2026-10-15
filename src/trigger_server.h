@@ -1,4 +1,4 @@
-// Encore trigger interface: a loopback-only HTTP listener that lets other applications start a
+// Pick trigger interface: a loopback-only HTTP listener that lets other applications start a
 // song rescan and queue songs. The listener thread never touches IL2CPP; it forwards each request
 // to the Unity window with SendMessageTimeout, so the window procedure handles it on the main
 // thread.
@@ -22,7 +22,7 @@ enum TriggerCommand : WPARAM
 enum RescanResult : LRESULT
 {
     kRescanStarted = 1,
-    kRescanNotReady,      // Encore not initialised, or detection failed
+    kRescanNotReady,      // Pick not initialised, or detection failed
     kRescanNotInSongList, // the song list is not open
     kRescanBusy,          // a scan is already running
     kRescanFailed,        // game objects missing (no SongScan instance, null container)

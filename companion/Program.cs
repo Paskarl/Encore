@@ -1,12 +1,12 @@
-// Encore companion: a small web server on the PC that lets phones on the local network search the
-// Clone Hero library and queue songs. It forwards a fixed set of requests to Encore's loopback
-// API (127.0.0.1:47321) and never exposes Encore itself.
+// Pick companion: a small web server on the PC that lets phones on the local network search the
+// Clone Hero library and queue songs. It forwards a fixed set of requests to Pick's loopback
+// API (127.0.0.1:47321) and never exposes Pick itself.
 //
 // Security model:
 //   - Every /api request must carry the pairing token (Authorization: Bearer <token>). The token
-//     is random, stored in %LOCALAPPDATA%\Encore\companion-token.txt and shown on the PC only
+//     is random, stored in %LOCALAPPDATA%\Pick\companion-token.txt and shown on the PC only
 //     (console QR code, and the /pair page that answers to the PC itself).
-//   - Short pairing codes: Encore's "Encore" main-menu entry asks for a 6-digit code over loopback
+//   - Short pairing codes: Pick's "Pick" main-menu entry asks for a 6-digit code over loopback
 //     (POST /pair/code) and shows it in the game; the phone trades it for the token
 //     (POST /pair/claim). One code at a time, valid for 10 minutes, void after 5 wrong guesses.
 //   - Requests from addresses outside private networks (loopback, RFC 1918, link-local, IPv6 ULA)
@@ -24,7 +24,7 @@ using QRCoder;
 var options = Options.Parse(args);
 if (options == null)
 {
-    Console.Error.WriteLine("usage: EncoreCompanion [--port 47322] [--encore-port 47321] [--songs-dir <folder>] [--new-token] [--no-browser]");
+    Console.Error.WriteLine("usage: PickCompanion [--port 47322] [--pick-port 47321] [--songs-dir <folder>] [--new-token] [--no-browser]");
     return 2;
 }
 Console.OutputEncoding = Encoding.UTF8;
@@ -40,9 +40,9 @@ builder.WebHost.ConfigureKestrel(k =>
     k.ListenAnyIP(options.Port);
     k.Limits.MaxRequestBodySize = 16 * 1024; // the largest valid request is a short JSON object
 });
-builder.Services.AddHttpClient("encore", c =>
+builder.Services.AddHttpClient("pick", c =>
 {
-    c.BaseAddress = new Uri($"http://127.0.0.1:{options.EncorePort}/");
+    c.BaseAddress = new Uri($"http://127.0.0.1:{options.PickPort}/");
     c.Timeout = TimeSpan.FromSeconds(6);
 });
 string songsDir = options.SongsDir ?? SongsFolder.Find();
@@ -109,30 +109,30 @@ app.MapPost("/pair/claim", async (HttpRequest req) =>
 {
     var body = await RequestJson.Read<PairClaim>(req);
     if (!pairCodes.Claim(body?.Code))
-        return Results.Json(new { result = "bad_code", message = "Wrong or expired code. Choose Encore in the game's main menu for a new one." },
+        return Results.Json(new { result = "bad_code", message = "Wrong or expired code. Choose Pick in the game's main menu for a new one." },
                             statusCode: StatusCodes.Status403Forbidden);
     return Results.Json(new { result = "paired", token });
 });
 
 var checksumPattern = new Regex("^[0-9A-Fa-f]{32}$");
 
-app.MapGet("/api/status", (IHttpClientFactory f) => Encore.Forward(f, HttpMethod.Get, "status"));
-app.MapGet("/api/setlist", (IHttpClientFactory f) => Encore.Forward(f, HttpMethod.Get, "setlist"));
-app.MapPost("/api/rescan", (IHttpClientFactory f) => Encore.Forward(f, HttpMethod.Post, "rescan"));
+app.MapGet("/api/status", (IHttpClientFactory f) => Pick.Forward(f, HttpMethod.Get, "status"));
+app.MapGet("/api/setlist", (IHttpClientFactory f) => Pick.Forward(f, HttpMethod.Get, "setlist"));
+app.MapPost("/api/rescan", (IHttpClientFactory f) => Pick.Forward(f, HttpMethod.Post, "rescan"));
 app.MapGet("/api/library", (IHttpClientFactory f, string? q, int? limit) =>
 {
     q = (q ?? "").Trim();
     if (q.Length > 200)
         return Task.FromResult(Results.BadRequest(new { result = "bad_request", message = "search text too long" }));
     int n = Math.Clamp(limit ?? 50, 1, 200);
-    return Encore.Forward(f, HttpMethod.Get, $"library?q={Uri.EscapeDataString(q)}&limit={n}");
+    return Pick.Forward(f, HttpMethod.Get, $"library?q={Uri.EscapeDataString(q)}&limit={n}");
 });
 app.MapPost("/api/queue", async (IHttpClientFactory f, HttpRequest req) =>
 {
     var body = await RequestJson.Read<QueueRequest>(req);
     if (body?.Checksum == null || !checksumPattern.IsMatch(body.Checksum))
         return Results.BadRequest(new { result = "bad_request", message = "give the song's checksum" });
-    return await Encore.Forward(f, HttpMethod.Post, "queue", JsonSerializer.Serialize(new { checksum = body.Checksum }));
+    return await Pick.Forward(f, HttpMethod.Post, "queue", JsonSerializer.Serialize(new { checksum = body.Checksum }));
 });
 
 // --- enchor.us (step 2): only on explicit requests from the phone, see Enchor.cs ---
@@ -164,10 +164,10 @@ app.MapPost("/api/enchor/search", async (HttpRequest req, EnchorClient enchor, D
     // Mark charts the library already has. enchor.us's md5 is not Clone Hero's checksum, so match
     // a chart downloaded here by its recorded checksum, anything else by title and artist.
     bool libraryChecked = true;
-    var library = new Dictionary<string, List<Encore.LibrarySong>>(StringComparer.OrdinalIgnoreCase);
+    var library = new Dictionary<string, List<Pick.LibrarySong>>(StringComparer.OrdinalIgnoreCase);
     foreach (string title in charts.Select(c => c.Title).Where(t => t.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase))
     {
-        var songs = await Encore.Search(f, title, 50);
+        var songs = await Pick.Search(f, title, 50);
         if (songs == null)
         {
             libraryChecked = false;
@@ -215,7 +215,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
 {
     var urls = Network.PairUrls(options.Port, token);
     Console.WriteLine();
-    Console.WriteLine("Encore companion is running. Scan the QR code with your phone (same Wi-Fi):");
+    Console.WriteLine("Pick companion is running. Scan the QR code with your phone (same Wi-Fi):");
     Console.WriteLine();
     if (urls.Count > 0)
     {
@@ -228,7 +228,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
         Console.WriteLine("  No network address found. Is the PC connected to the network?");
     Console.WriteLine();
     Console.WriteLine($"If the QR code above doesn't scan, open http://localhost:{options.Port}/pair on this PC.");
-    Console.WriteLine($"Talking to Encore on http://127.0.0.1:{options.EncorePort}. Stop with Ctrl+C.");
+    Console.WriteLine($"Talking to Pick on http://127.0.0.1:{options.PickPort}. Stop with Ctrl+C.");
     Console.WriteLine($"Charts from enchor.us are saved to {app.Services.GetRequiredService<DownloadManager>().DownloadDir}");
     if (tokenIsNew && !options.NoBrowser)
         Pairing.OpenInBrowser($"http://localhost:{options.Port}/pair");
@@ -333,7 +333,7 @@ static class SongsFolder
 sealed class Options
 {
     public int Port = 47322;
-    public int EncorePort = 47321;
+    public int PickPort = 47321;
     public bool NewToken;
     public bool NoBrowser;
     public string? SongsDir;
@@ -341,8 +341,8 @@ sealed class Options
     public static Options? Parse(string[] args)
     {
         var o = new Options();
-        if (int.TryParse(Environment.GetEnvironmentVariable("ENCORE_PORT"), out int envPort) && envPort > 0)
-            o.EncorePort = envPort;
+        if (int.TryParse(Environment.GetEnvironmentVariable("PICK_PORT"), out int envPort) && envPort > 0)
+            o.PickPort = envPort;
         for (int i = 0; i < args.Length; ++i)
         {
             switch (args[i])
@@ -351,8 +351,8 @@ sealed class Options
                     o.Port = p;
                     ++i;
                     break;
-                case "--encore-port" when i + 1 < args.Length && int.TryParse(args[i + 1], out int e) && e is > 0 and < 65536:
-                    o.EncorePort = e;
+                case "--pick-port" when i + 1 < args.Length && int.TryParse(args[i + 1], out int e) && e is > 0 and < 65536:
+                    o.PickPort = e;
                     ++i;
                     break;
                 case "--songs-dir" when i + 1 < args.Length && Directory.Exists(args[i + 1]):
@@ -372,14 +372,14 @@ sealed class Options
     }
 }
 
-static class Encore
+static class Pick
 {
     public const int Offline = 0;
 
-    // Sends a request to Encore. Status 0 (Offline) means Encore did not answer at all.
+    // Sends a request to Pick. Status 0 (Offline) means Pick did not answer at all.
     public static async Task<(int status, string body)> Call(IHttpClientFactory factory, HttpMethod method, string path, string? json = null)
     {
-        var client = factory.CreateClient("encore");
+        var client = factory.CreateClient("pick");
         using var msg = new HttpRequestMessage(method, path);
         if (json != null)
             msg.Content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -394,19 +394,19 @@ static class Encore
         }
     }
 
-    // Forwards a request to Encore and passes its status code and JSON answer through.
+    // Forwards a request to Pick and passes its status code and JSON answer through.
     public static async Task<IResult> Forward(IHttpClientFactory factory, HttpMethod method, string path, string? json = null)
     {
         var (status, body) = await Call(factory, method, path, json);
         if (status == Offline)
-            return Results.Json(new { result = "encore_offline", message = "Clone Hero with Encore is not running on the PC" },
+            return Results.Json(new { result = "pick_offline", message = "Clone Hero with Pick is not running on the PC" },
                                 statusCode: StatusCodes.Status502BadGateway);
         return Results.Content(body, "application/json; charset=utf-8", Encoding.UTF8, status);
     }
 
     public record LibrarySong(string Title, string Artist, string Album, string Checksum);
 
-    // Library songs matching a search text (GET /library); null if Encore is not reachable or not ready.
+    // Library songs matching a search text (GET /library); null if Pick is not reachable or not ready.
     public static async Task<List<LibrarySong>?> Search(IHttpClientFactory factory, string q, int limit = 200)
     {
         var (status, body) = await Call(factory, HttpMethod.Get, $"library?q={Uri.EscapeDataString(q)}&limit={limit}");
@@ -507,7 +507,7 @@ static class Network
 
 static class Pairing
 {
-    static string TokenPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Encore", "companion-token.txt");
+    static string TokenPath => Path.Combine(AppData.Dir, "companion-token.txt");
 
     public static string LoadOrCreateToken(bool renew, out bool isNew)
     {
@@ -546,7 +546,7 @@ static class Pairing
           .Append("<title>Pair a phone</title><style>body{font-family:system-ui,sans-serif;margin:0;padding:24px 16px;background:#14161a;color:#eceef2;text-align:center}")
           .Append("h1{font-size:1.4rem}.qr{background:#fff;display:inline-block;padding:16px;border-radius:12px;margin:12px}.qr svg{width:min(70vw,320px);height:auto;display:block}")
           .Append("code{word-break:break-all;color:#9fb4ff}p{color:#a9aeb8;max-width:36rem;margin:12px auto}</style></head><body>")
-          .Append("<h1>Pair your phone with Encore</h1><p>Connect the phone to the same Wi-Fi as this PC and scan a code with its camera. ")
+          .Append("<h1>Pair your phone with Pick</h1><p>Connect the phone to the same Wi-Fi as this PC and scan a code with its camera. ")
           .Append("The page that opens remembers the pairing.</p>");
         if (urls.Count == 0)
             sb.Append("<p>No network address found. Is this PC connected to the network?</p>");
@@ -558,5 +558,30 @@ static class Pairing
         sb.Append("<p>Keep this code private: anyone with it can queue songs while the companion runs. ")
           .Append("To revoke it, restart the companion with <code>--new-token</code>.</p></body></html>");
         return sb.ToString();
+    }
+}
+
+// %LOCALAPPDATA%\Pick: pairing token and download list. Versions before the rename (Encore) used
+// %LOCALAPPDATA%\Encore; that folder is moved over once, so paired phones stay paired.
+static class AppData
+{
+    public static string Dir { get; } = Init();
+
+    static string Init()
+    {
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string dir = Path.Combine(local, "Pick"), old = Path.Combine(local, "Encore");
+        try
+        {
+            if (!Directory.Exists(dir) && Directory.Exists(old))
+                Directory.Move(old, dir);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+        return dir;
     }
 }

@@ -1,13 +1,13 @@
-// Starts the companion and fetches a pairing code for the "Encore" main-menu entry.
+// Starts the companion and fetches a pairing code for the "Pick" main-menu entry.
 //
-// Where the companion is: ENCORE_COMPANION (full path to EncoreCompanion.exe), otherwise
-// EncoreCompanion\EncoreCompanion.exe next to the game's executable (a `dotnet publish` output
+// Where the companion is: PICK_COMPANION (full path to PickCompanion.exe), otherwise
+// PickCompanion\PickCompanion.exe next to the game's executable (a `dotnet publish` output
 // folder). It is started with its own console window (minimized, so a fullscreen game keeps the
 // focus); closing that window stops it. --no-browser keeps it from opening the pairing page over
 // the game when it creates a new token.
 //
 // The code comes from the companion's POST /pair/code, which only answers to loopback with a
-// loopback Host header. Encore itself stays loopback-only; the companion is the LAN-facing part.
+// loopback Host header. Pick itself stays loopback-only; the companion is the LAN-facing part.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -22,14 +22,14 @@ struct LaunchJob
 {
     HWND wnd;
     UINT msg;
-    unsigned short encorePort;
+    unsigned short pickPort;
 };
 
 static std::wstring CompanionPath()
 {
     // Long enough for long-path game folders; a truncated path would point somewhere else.
     std::wstring buf(32768, L'\0');
-    DWORD n = GetEnvironmentVariableW(L"ENCORE_COMPANION", &buf[0], static_cast<DWORD>(buf.size()));
+    DWORD n = GetEnvironmentVariableW(L"PICK_COMPANION", &buf[0], static_cast<DWORD>(buf.size()));
     if (n > 0 && n < buf.size())
         return buf.c_str();
     n = GetModuleFileNameW(nullptr, &buf[0], static_cast<DWORD>(buf.size()));
@@ -38,7 +38,7 @@ static std::wstring CompanionPath()
     std::wstring path = buf.c_str();
     size_t slash = path.find_last_of(L'\\');
     path = path.substr(0, slash == std::wstring::npos ? 0 : slash + 1);
-    return path + L"EncoreCompanion\\EncoreCompanion.exe";
+    return path + L"PickCompanion\\PickCompanion.exe";
 }
 
 static std::string Utf8(const std::wstring& w)
@@ -121,7 +121,7 @@ static int JsonInt(const std::string& json, const char* key)
     return p == std::string::npos ? 0 : atoi(json.c_str() + p);
 }
 
-static bool StartCompanion(unsigned short encorePort, std::string& error)
+static bool StartCompanion(unsigned short pickPort, std::string& error)
 {
     std::wstring exe = CompanionPath();
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES)
@@ -131,7 +131,7 @@ static bool StartCompanion(unsigned short encorePort, std::string& error)
         return false;
     }
     std::wstring dir = exe.substr(0, exe.find_last_of(L'\\'));
-    std::wstring cmd = L"\"" + exe + L"\" --encore-port " + std::to_wstring(encorePort) + L" --no-browser";
+    std::wstring cmd = L"\"" + exe + L"\" --pick-port " + std::to_wstring(pickPort) + L" --no-browser";
     STARTUPINFOW si = {sizeof(si)};
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_SHOWMINNOACTIVE;
@@ -164,7 +164,7 @@ static DWORD WINAPI LaunchThread(LPVOID param)
         if (status == 0)
         {
             // Not running: start it and wait until it answers (a .NET start takes a few seconds).
-            if (StartCompanion(job.encorePort, result->error))
+            if (StartCompanion(job.pickPort, result->error))
             {
                 result->started = true;
                 for (int i = 0; i < 100 && status == 0; ++i)
@@ -202,11 +202,11 @@ static DWORD WINAPI LaunchThread(LPVOID param)
     return 0;
 }
 
-bool RequestCompanionPairing(HWND wnd, UINT resultMsg, unsigned short encorePort)
+bool RequestCompanionPairing(HWND wnd, UINT resultMsg, unsigned short pickPort)
 {
     if (InterlockedCompareExchange(&s_pending, 1, 0) != 0)
         return false;
-    auto* job = new LaunchJob{wnd, resultMsg, encorePort};
+    auto* job = new LaunchJob{wnd, resultMsg, pickPort};
     HANDLE t = CreateThread(nullptr, 0, LaunchThread, job, 0, nullptr);
     if (!t)
     {

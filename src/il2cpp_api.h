@@ -54,6 +54,11 @@ struct MethodInfo;
     X(Il2CppObject*, il2cpp_type_get_object, (const Il2CppType*))                                  \
     X(uint32_t, il2cpp_array_length, (void*))                                                      \
     X(void, il2cpp_field_set_value, (Il2CppObject*, FieldInfo*, void*))                            \
+    X(Il2CppObject*, il2cpp_array_new, (Il2CppClass*, uintptr_t))                                  \
+    X(Il2CppClass*, il2cpp_class_get_element_class, (Il2CppClass*))                                \
+    X(void, il2cpp_gc_wbarrier_set_field, (Il2CppObject*, void**, void*))                          \
+    X(void, il2cpp_format_exception, (Il2CppObject*, char*, int))                                  \
+    X(void, il2cpp_format_stack_trace, (Il2CppObject*, char*, int))                                \
     X(void, il2cpp_free, (void*))
 
 #define IL2CPP_DECLARE(ret, name, args) \

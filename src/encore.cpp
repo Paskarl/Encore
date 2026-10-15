@@ -3,7 +3,8 @@
 // so all IL2CPP calls happen on the Unity main thread, and starts a song rescan when F5 is
 // pressed in the song list or another application sends POST /rescan to the loopback HTTP
 // listener (trigger_server.cpp). The listener can also queue songs into the game's setlist
-// (POST /queue). With ENCORE_DUMP=1 it also dumps the analysed classes.
+// (POST /queue). Encore also adds an "Encore" main-menu entry that starts the companion. With
+// ENCORE_DUMP=1 it also dumps the analysed classes.
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include "il2cpp_api.h"
 #include "trigger_server.h"
+#include "companion_launcher.h"
 
 static FILE* g_log = nullptr;
 static HWND g_unityWnd = nullptr;
@@ -333,13 +335,19 @@ static bool ResolveGameRefs(const Il2CppImage* game)
     return r.ok;
 }
 
+static bool g_invokeFailed = false; // the last Invoke threw
+
 static Il2CppObject* Invoke(const MethodInfo* m, void* obj, void** args)
 {
     Il2CppObject* exc = nullptr;
     Il2CppObject* ret = il2cpp_runtime_invoke(m, obj, args, &exc);
+    g_invokeFailed = exc != nullptr;
     if (exc)
     {
-        Log("exception while invoking %s", il2cpp_method_get_name(m));
+        char text[1024] = "", stack[4096] = "";
+        il2cpp_format_exception(exc, text, sizeof(text));
+        il2cpp_format_stack_trace(exc, stack, sizeof(stack));
+        Log("exception while invoking %s: %s\n%s", il2cpp_method_get_name(m), text, stack);
         return nullptr;
     }
     return ret;
@@ -1371,6 +1379,859 @@ static void HandleQueue(JsonRequest* req)
               ",\"count\":" + std::to_string(newCount) + ",\"matches\":" + std::to_string(matches) + "}");
 }
 
+// ---------------------------------------------------------------------------------------------
+// "Encore" entry in the main menu (docs/ANALYSIS.md section 8).
+//
+//   - BaseMenu draws menuStrings into textObjects/backgroundObjects. Its visible count is
+//     min(textObjects.Length, menuStrings.Length) and the rest scrolls; both ints are obfuscated
+//     fields, the 3rd and 4th Int32 field of BaseMenu (max scroll, visible count). Encore checks
+//     their values against that formula on the live menu before it changes anything.
+//   - Confirming an entry calls a virtual BaseMenu method that MainMenu overrides. The override
+//     reads the selected menu string (BaseMenu's only `string X()` method) and switches on it;
+//     an unknown string does nothing. It is the only MainMenu method that calls that getter and
+//     it is only reached through MainMenu's vtable (no direct callers), so Encore replaces the
+//     method pointer in that vtable slot with a wrapper (a data change, no code patching): the
+//     wrapper handles "Encore" and passes everything else to the original.
+//   - The dialog is MainMenu.confirmMenu (ConfirmationMenu). Its "show" method takes
+//     (title, option 1, option 2, on option 1, on option 2, body); title and options go through
+//     the game's text lookup, which returns the key itself for unknown keys. ConfirmationMenu has
+//     several copies of it (obfuscator); the real one is the only one in its vtable.
+//   - The text lookup also handles the menu label: "Encore" is not a key, so it is shown as is.
+// ---------------------------------------------------------------------------------------------
+
+static const UINT WM_ENCORE_COMPANION = WM_APP + 0x4C4A; // lParam = CompanionResult*
+static const UINT_PTR kMenuTimer = 0x4C4B;
+static const wchar_t kEntryLabel[] = L"Encore";
+static const char kEntryLabelUtf8[] = "Encore";
+static const char kEntryTip[] = "Start the phone companion and pair a phone";
+
+using ConfirmFn = void (*)(Il2CppObject*, const MethodInfo*);
+static unsigned short TriggerPort();
+
+struct MenuRefs
+{
+    Il2CppClass* mainMenu = nullptr;
+    Il2CppClass* baseMenu = nullptr;
+    Il2CppClass* confirmClass = nullptr;
+    FieldInfo* menuStrings = nullptr;
+    FieldInfo* tipStrings = nullptr;
+    FieldInfo* textObjects = nullptr;
+    FieldInfo* backgrounds = nullptr;
+    FieldInfo* useUppercase = nullptr;
+    FieldInfo* isActive = nullptr;
+    FieldInfo* maxScroll = nullptr;    // 3rd Int32 field of BaseMenu
+    FieldInfo* visibleCount = nullptr; // 4th Int32 field of BaseMenu
+    FieldInfo* confirmMenu = nullptr;  // MainMenu
+    std::vector<FieldInfo*> dialogs;   // MainMenu's ConfirmationMenu fields
+    FieldInfo* dialogTitle = nullptr;  // ConfirmationMenu.messageTitleText
+    FieldInfo* dialogBody = nullptr;   // ConfirmationMenu.messageBodyText
+    FieldInfo* mmSongScan = nullptr;
+    FieldInfo* subMenus[3] = {};       // MainMenu songSelect, settingsMenu, onlineMenu (GameObjects)
+    const MethodInfo* selectedString = nullptr;
+    const MethodInfo* confirm = nullptr;     // MainMenu override
+    const MethodInfo* baseConfirm = nullptr; // BaseMenu method it overrides
+    std::vector<const MethodInfo*> showCandidates;
+    const MethodInfo* showDialog = nullptr;
+    // Unity
+    const MethodInfo* instantiate = nullptr; // Object.Instantiate(Object, Transform, bool), or
+    const MethodInfo* instantiate1 = nullptr; // Object.Instantiate(Object) + Transform.SetParent
+    const MethodInfo* setParent = nullptr;    // Transform.SetParent(Transform, bool)
+    const MethodInfo* getTransform = nullptr;
+    const MethodInfo* getParent = nullptr;
+    const MethodInfo* getLocalPos = nullptr;
+    const MethodInfo* setLocalPos = nullptr;
+    const MethodInfo* inChildren = nullptr;  // Component.GetComponentInChildren(Type)
+    const MethodInfo* setText = nullptr;     // TMP_Text.set_text
+    const MethodInfo* activeSelf = nullptr;
+    bool resolved = false; // static part done
+    bool hooked = false;
+    bool disabled = false; // detection failed at runtime: leave the menu alone
+};
+static MenuRefs g_menu;
+static ConfirmFn g_origConfirm = nullptr;
+static Il2CppObject* g_menuRefused = nullptr; // last MainMenu instance the entry was refused for
+
+static int ArrayLength(Il2CppObject* a)
+{
+    return a ? static_cast<int>(il2cpp_array_length(a)) : 0;
+}
+
+static Il2CppObject*& ArrayItem(Il2CppObject* a, int i)
+{
+    return reinterpret_cast<Il2CppObject**>(reinterpret_cast<char*>(a) + 0x20)[i];
+}
+
+// A copy of a reference-type array with one more element.
+static Il2CppObject* ArrayAppend(Il2CppObject* arr, Il2CppObject* extra)
+{
+    Il2CppClass* elem = il2cpp_class_get_element_class(il2cpp_object_get_class(arr));
+    int n = ArrayLength(arr);
+    Il2CppObject* out = elem ? il2cpp_array_new(elem, n + 1) : nullptr;
+    if (!out)
+        return nullptr;
+    for (int i = 0; i < n; ++i)
+        il2cpp_gc_wbarrier_set_field(out, reinterpret_cast<void**>(&ArrayItem(out, i)), ArrayItem(arr, i));
+    il2cpp_gc_wbarrier_set_field(out, reinterpret_cast<void**>(&ArrayItem(out, n)), extra);
+    return out;
+}
+
+// The function a RUNTIME_FUNCTION belongs to: MSVC splits large functions into chunks whose unwind
+// info is chained (UNW_FLAG_CHAININFO) to the primary entry.
+static const RUNTIME_FUNCTION* PrimaryEntry(DWORD64 imageBase, const RUNTIME_FUNCTION* rf)
+{
+    for (int depth = 0; rf && depth < 32; ++depth)
+    {
+        auto info = reinterpret_cast<const uint8_t*>(imageBase + rf->UnwindData);
+        if (!((info[0] >> 3) & UNW_FLAG_CHAININFO))
+            return rf;
+        uint8_t codes = info[2];
+        rf = reinterpret_cast<const RUNTIME_FUNCTION*>(info + 4 + ((codes + 1) & ~1) * 2);
+    }
+    return nullptr;
+}
+
+// The machine code of the function starting at fn. Its extent comes from the x64 unwind tables:
+// the primary entry plus the chained chunks right after it.
+static bool FunctionCode(void* fn, const uint8_t*& code, size_t& size)
+{
+    DWORD64 imageBase = 0;
+    PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(fn), &imageBase, nullptr);
+    if (!rf || imageBase + rf->BeginAddress != reinterpret_cast<DWORD64>(fn))
+        return false;
+    DWORD begin = rf->BeginAddress, end = rf->EndAddress;
+    for (int chunks = 0; chunks < 64; ++chunks)
+    {
+        DWORD64 nextBase = 0;
+        PRUNTIME_FUNCTION next = RtlLookupFunctionEntry(imageBase + end, &nextBase, nullptr);
+        if (!next || next->BeginAddress != end || PrimaryEntry(imageBase, next) == nullptr ||
+            PrimaryEntry(imageBase, next)->BeginAddress != begin)
+            break;
+        end = next->EndAddress;
+    }
+    code = reinterpret_cast<const uint8_t*>(imageBase + begin);
+    size = end - begin;
+    return true;
+}
+
+// True if the function starting at fn contains a call/jmp rel32 to target.
+static bool CallsTarget(void* fn, void* target)
+{
+    const uint8_t* code;
+    size_t size;
+    if (!FunctionCode(fn, code, size))
+        return false;
+    for (size_t i = 0; i + 5 <= size; ++i)
+    {
+        if (code[i] != 0xE8 && code[i] != 0xE9)
+            continue;
+        int32_t rel;
+        memcpy(&rel, code + i + 1, sizeof(rel));
+        if (code + i + 5 + rel == target)
+            return true;
+    }
+    return false;
+}
+
+// Counts virtual calls to a 6-parameter method through the given vtable offset in the methods of k
+// and its nested types. IL2CPP calls virtual methods as klass->vtable[slot].methodPtr and passes
+// vtable[slot].method as the last argument; with `this` plus 6 parameters that is the 8th argument,
+// on the stack at [rsp+0x38]. The pattern is `mov r64, [reg+offset+8]` directly followed by
+// `mov [rsp+0x38], r64`. Matching the argument position keeps calls of other classes' methods that
+// happen to sit at the same vtable offset (e.g. TMP_Text.set_text) out of the count.
+static int CountVirtualCalls(Il2CppClass* k, int32_t offset)
+{
+    std::vector<uintptr_t> bodies;
+    CollectMethodBodies(k, bodies);
+    std::sort(bodies.begin(), bodies.end());
+    bodies.erase(std::unique(bodies.begin(), bodies.end()), bodies.end());
+    int count = 0;
+    for (uintptr_t fn : bodies)
+    {
+        const uint8_t* code;
+        size_t size;
+        if (!FunctionCode(reinterpret_cast<void*>(fn), code, size))
+            continue;
+        for (size_t i = 0; i + 12 <= size; ++i)
+        {
+            // mov r64, [base+disp32]: REX.W 8B modrm(mod=10, rm!=100)
+            const uint8_t* p = code + i;
+            if ((p[0] & 0xF8) != 0x48 || p[1] != 0x8B || (p[2] >> 6) != 2 || (p[2] & 7) == 4)
+                continue;
+            int32_t disp;
+            memcpy(&disp, p + 3, sizeof(disp));
+            if (disp != offset + 8)
+                continue;
+            int reg = ((p[0] >> 2) & 1) << 3 | ((p[2] >> 3) & 7);
+            // mov [rsp+0x38], r64: REX.W 89 modrm(mod=01, rm=100) SIB 24 disp8 38
+            const uint8_t* q = p + 7;
+            if ((q[0] & 0xF8) == 0x48 && q[1] == 0x89 && (q[2] & 0xC7) == 0x44 && q[3] == 0x24 && q[4] == 0x38 &&
+                (((q[0] >> 2) & 1) << 3 | ((q[2] >> 3) & 7)) == reg)
+                ++count;
+        }
+    }
+    return count;
+}
+
+// The vtable entry {methodPtr, MethodInfo*} of m in class k (IL2CPP keeps the vtable inline at the
+// end of Il2CppClass). Returns the address of methodPtr, or null unless there is exactly one.
+static void** FindVtableSlot(Il2CppClass* k, const MethodInfo* m)
+{
+    void* ptr = il2cpp_method_pointer(m);
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!ptr || !VirtualQuery(k, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT)
+        return nullptr;
+    uintptr_t end = (std::min)(reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize,
+                               reinterpret_cast<uintptr_t>(k) + 0x2000);
+    void** found = nullptr;
+    int matches = 0;
+    for (auto p = reinterpret_cast<void**>(k); reinterpret_cast<uintptr_t>(p + 2) <= end; ++p)
+        if (p[0] == ptr && p[1] == m)
+        {
+            found = p;
+            ++matches;
+        }
+    return matches == 1 ? found : nullptr;
+}
+
+static bool IsInstance(const MethodInfo* m)
+{
+    uint32_t iflags = 0;
+    return !(il2cpp_method_get_flags(m, &iflags) & kAttrStatic);
+}
+
+static const MethodInfo* FindMethod(Il2CppClass* k, const char* name, std::initializer_list<const char*> params,
+                                    const char* ret = nullptr)
+{
+    const MethodInfo* found = nullptr;
+    void* it = nullptr;
+    while (const MethodInfo* m = il2cpp_class_get_methods(k, &it))
+    {
+        if (strcmp(il2cpp_method_get_name(m), name) != 0 || il2cpp_method_get_param_count(m) != params.size())
+            continue;
+        if (ret && TypeName(il2cpp_method_get_return_type(m)) != ret)
+            continue;
+        uint32_t i = 0;
+        bool match = true;
+        for (const char* p : params)
+            match = match && TypeName(il2cpp_method_get_param(m, i++)) == p;
+        if (match)
+            found = m;
+    }
+    return found;
+}
+
+// Everything that can be resolved without a live menu. The vtable checks need initialised classes
+// and run when the first MainMenu instance shows up (InstallMenuHook).
+static bool ResolveMenuRefs(const Il2CppImage* game)
+{
+    MenuRefs& r = g_menu;
+    r.mainMenu = il2cpp_class_from_name(game, "", "MainMenu");
+    r.baseMenu = il2cpp_class_from_name(game, "", "BaseMenu");
+    r.confirmClass = il2cpp_class_from_name(game, "", "ConfirmationMenu");
+    if (!r.mainMenu || !r.baseMenu || !r.confirmClass || il2cpp_class_get_parent(r.mainMenu) != r.baseMenu ||
+        il2cpp_class_get_parent(r.confirmClass) != r.baseMenu)
+    {
+        Log("menu: MainMenu/BaseMenu/ConfirmationMenu not found or hierarchy changed, no Encore menu entry");
+        return false;
+    }
+    r.menuStrings = il2cpp_class_get_field_from_name(r.baseMenu, "menuStrings");
+    r.tipStrings = il2cpp_class_get_field_from_name(r.baseMenu, "tipStrings");
+    r.textObjects = il2cpp_class_get_field_from_name(r.baseMenu, "textObjects");
+    r.backgrounds = il2cpp_class_get_field_from_name(r.baseMenu, "backgroundObjects");
+    r.useUppercase = il2cpp_class_get_field_from_name(r.baseMenu, "useUppercase");
+    r.isActive = il2cpp_class_get_field_from_name(r.baseMenu, "isActive");
+    r.confirmMenu = il2cpp_class_get_field_from_name(r.mainMenu, "confirmMenu");
+    r.dialogTitle = il2cpp_class_get_field_from_name(r.confirmClass, "messageTitleText");
+    r.dialogBody = il2cpp_class_get_field_from_name(r.confirmClass, "messageBodyText");
+    {
+        void* fit = nullptr;
+        while (FieldInfo* f = il2cpp_class_get_fields(r.mainMenu, &fit))
+            if (!IsStatic(f) && TypeName(il2cpp_field_get_type(f)) == "ConfirmationMenu")
+                r.dialogs.push_back(f);
+    }
+    r.mmSongScan = il2cpp_class_get_field_from_name(r.mainMenu, "songScan");
+    r.subMenus[0] = il2cpp_class_get_field_from_name(r.mainMenu, "songSelect");
+    r.subMenus[1] = il2cpp_class_get_field_from_name(r.mainMenu, "settingsMenu");
+    r.subMenus[2] = il2cpp_class_get_field_from_name(r.mainMenu, "onlineMenu");
+
+    // BaseMenu's first four Int32 fields: scroll offset, selection, max scroll, visible count.
+    std::vector<FieldInfo*> ints;
+    void* it = nullptr;
+    while (FieldInfo* f = il2cpp_class_get_fields(r.baseMenu, &it))
+        if (!IsStatic(f) && TypeName(il2cpp_field_get_type(f)) == "System.Int32")
+            ints.push_back(f);
+    if (ints.size() >= 4 && il2cpp_field_get_offset(ints[3]) == il2cpp_field_get_offset(ints[2]) + 4)
+    {
+        r.maxScroll = ints[2];
+        r.visibleCount = ints[3];
+    }
+
+    // The selected-string getter: BaseMenu's only instance method `string X()`.
+    int getters = 0;
+    it = nullptr;
+    while (const MethodInfo* m = il2cpp_class_get_methods(r.baseMenu, &it))
+        if (IsInstance(m) && il2cpp_method_get_param_count(m) == 0 &&
+            TypeName(il2cpp_method_get_return_type(m)) == "System.String")
+        {
+            r.selectedString = m;
+            ++getters;
+        }
+    if (getters != 1)
+        r.selectedString = nullptr;
+
+    // The confirm override: a MainMenu `void X()` that calls the getter and overrides a BaseMenu
+    // method of the same name. Uniqueness is checked against the vtable in InstallMenuHook.
+    std::vector<const MethodInfo*> confirms;
+    if (r.selectedString)
+    {
+        void* getter = il2cpp_method_pointer(r.selectedString);
+        it = nullptr;
+        while (const MethodInfo* m = il2cpp_class_get_methods(r.mainMenu, &it))
+            if (IsInstance(m) && il2cpp_method_get_param_count(m) == 0 && il2cpp_method_pointer(m) &&
+                TypeName(il2cpp_method_get_return_type(m)) == "System.Void" && CallsTarget(il2cpp_method_pointer(m), getter))
+                confirms.push_back(m);
+    }
+    if (confirms.size() == 1)
+    {
+        r.confirm = confirms[0];
+        r.baseConfirm = FindMethod(r.baseMenu, il2cpp_method_get_name(r.confirm), {}, "System.Void");
+    }
+
+    // ConfirmationMenu "show" candidates: (string, string, string, D, D, string) with D its delegate.
+    it = nullptr;
+    while (const MethodInfo* m = il2cpp_class_get_methods(r.confirmClass, &it))
+    {
+        if (!IsInstance(m) || il2cpp_method_get_param_count(m) != 6 || !il2cpp_method_pointer(m))
+            continue;
+        std::string d = TypeName(il2cpp_method_get_param(m, 3));
+        if (TypeName(il2cpp_method_get_param(m, 0)) == "System.String" &&
+            TypeName(il2cpp_method_get_param(m, 1)) == "System.String" &&
+            TypeName(il2cpp_method_get_param(m, 2)) == "System.String" && d.rfind("ConfirmationMenu.", 0) == 0 &&
+            TypeName(il2cpp_method_get_param(m, 4)) == d && TypeName(il2cpp_method_get_param(m, 5)) == "System.String")
+            r.showCandidates.push_back(m);
+    }
+
+    const Il2CppImage* core = FindImage("UnityEngine.CoreModule.dll");
+    const Il2CppImage* tmp = FindImage("Unity.TextMeshPro.dll");
+    Il2CppClass* object = core ? il2cpp_class_from_name(core, "UnityEngine", "Object") : nullptr;
+    Il2CppClass* component = core ? il2cpp_class_from_name(core, "UnityEngine", "Component") : nullptr;
+    Il2CppClass* transform = core ? il2cpp_class_from_name(core, "UnityEngine", "Transform") : nullptr;
+    Il2CppClass* gameObject = core ? il2cpp_class_from_name(core, "UnityEngine", "GameObject") : nullptr;
+    Il2CppClass* tmpText = tmp ? il2cpp_class_from_name(tmp, "TMPro", "TMP_Text") : nullptr;
+    if (object)
+    {
+        r.instantiate = FindMethod(object, "Instantiate", {"UnityEngine.Object", "UnityEngine.Transform", "System.Boolean"},
+                                   "UnityEngine.Object");
+        r.instantiate1 = FindMethod(object, "Instantiate", {"UnityEngine.Object"}, "UnityEngine.Object");
+        it = nullptr;
+        while (const MethodInfo* m = il2cpp_class_get_methods(object, &it))
+            if (strcmp(il2cpp_method_get_name(m), "Instantiate") == 0 || strstr(il2cpp_method_get_name(m), "Clone"))
+            {
+                std::string sig;
+                for (uint32_t i = 0; i < il2cpp_method_get_param_count(m); ++i)
+                    sig += (i ? ", " : "") + TypeName(il2cpp_method_get_param(m, i));
+                Log("  Object.%s(%s) -> %s", il2cpp_method_get_name(m), sig.c_str(),
+                    TypeName(il2cpp_method_get_return_type(m)).c_str());
+            }
+    }
+    if (component)
+    {
+        r.getTransform = FindMethod(component, "get_transform", {});
+        r.inChildren = FindMethod(component, "GetComponentInChildren", {"System.Type"});
+    }
+    if (transform)
+    {
+        r.getParent = FindMethod(transform, "get_parent", {});
+        r.getLocalPos = FindMethod(transform, "get_localPosition", {});
+        r.setLocalPos = FindMethod(transform, "set_localPosition", {"UnityEngine.Vector3"});
+        r.setParent = FindMethod(transform, "SetParent", {"UnityEngine.Transform", "System.Boolean"});
+    }
+    if (gameObject)
+        r.activeSelf = FindMethod(gameObject, "get_activeSelf", {});
+    if (tmpText)
+        r.setText = FindMethod(tmpText, "set_text", {"System.String"});
+
+    // Required pieces; cloning (Instantiate, GetComponentInChildren) is checked when it is needed.
+    std::string missing;
+    auto need = [&missing](const void* p, const char* name) {
+        if (!p)
+            missing += std::string(missing.empty() ? "" : ", ") + name;
+    };
+    need(r.menuStrings, "menuStrings");
+    need(r.tipStrings, "tipStrings");
+    need(r.textObjects, "textObjects");
+    need(r.backgrounds, "backgroundObjects");
+    need(r.useUppercase, "useUppercase");
+    need(r.isActive, "isActive");
+    need(r.maxScroll, "max scroll/visible count fields");
+    need(r.confirmMenu, "MainMenu.confirmMenu");
+    need(r.dialogTitle, "ConfirmationMenu.messageTitleText");
+    need(r.dialogBody, "ConfirmationMenu.messageBodyText");
+    need(r.mmSongScan, "MainMenu.songScan");
+    need(r.subMenus[0], "MainMenu.songSelect");
+    need(r.subMenus[1], "MainMenu.settingsMenu");
+    need(r.subMenus[2], "MainMenu.onlineMenu");
+    need(r.selectedString, "selected-string getter");
+    need(r.confirm, "confirm method");
+    need(r.baseConfirm, "BaseMenu method overridden by it");
+    need(r.showCandidates.empty() ? nullptr : &r.showCandidates, "ConfirmationMenu show method");
+    need(r.getTransform, "Component.get_transform");
+    need(r.getParent, "Transform.get_parent");
+    need(r.getLocalPos, "Transform.get_localPosition");
+    need(r.setLocalPos, "Transform.set_localPosition");
+    need(r.activeSelf, "GameObject.get_activeSelf");
+    need(r.setText, "TMP_Text.set_text");
+    need(g_refs.waitForFinish, "SongScan.waitForFinish");
+    r.resolved = missing.empty();
+    Log("menu resolve: Int32 fields=%zu (max scroll off 0x%zx, visible off 0x%zx) selected-string getters=%d "
+        "confirm candidates=%zu (%s, RVA 0x%llx) show candidates=%zu Instantiate=%p/%p SetParent=%p "
+        "GetComponentInChildren=%p -> %s%s",
+        ints.size(), r.maxScroll ? il2cpp_field_get_offset(r.maxScroll) : 0,
+        r.visibleCount ? il2cpp_field_get_offset(r.visibleCount) : 0, getters, confirms.size(),
+        r.baseConfirm ? "overrides BaseMenu" : "no BaseMenu method of that name",
+        static_cast<unsigned long long>(Rva(r.confirm ? il2cpp_method_pointer(r.confirm) : nullptr)), r.showCandidates.size(),
+        r.instantiate, r.instantiate1, r.setParent, r.inChildren,
+        r.resolved ? "ok" : "FAILED, no Encore menu entry; missing: ", missing.c_str());
+    return r.resolved;
+}
+
+static void MenuEncoreSelected(Il2CppObject* menu);
+
+static bool SelectedIsEncore(Il2CppObject* menu)
+{
+    Il2CppString* s = reinterpret_cast<Il2CppString*>(Invoke(g_menu.selectedString, menu, nullptr));
+    return s && WideString(s) == kEntryLabel;
+}
+
+// Replaces MainMenu's confirm method in its vtable. Runs on the main thread from inside the game's
+// Update, like the original.
+static void HookedConfirm(Il2CppObject* self, const MethodInfo* method)
+{
+    if (!g_menu.disabled && SelectedIsEncore(self))
+    {
+        MenuEncoreSelected(self);
+        return;
+    }
+    g_origConfirm(self, method);
+}
+
+// Needs initialised MainMenu and ConfirmationMenu classes, i.e. a live main menu.
+static bool InstallMenuHook()
+{
+    MenuRefs& r = g_menu;
+    void** slot = FindVtableSlot(r.mainMenu, r.confirm);
+    void** baseSlot = FindVtableSlot(r.baseMenu, r.baseConfirm);
+    ptrdiff_t off = slot ? reinterpret_cast<char*>(slot) - reinterpret_cast<char*>(r.mainMenu) : -1;
+    ptrdiff_t baseOff = baseSlot ? reinterpret_cast<char*>(baseSlot) - reinterpret_cast<char*>(r.baseMenu) : -2;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    bool writable = slot && VirtualQuery(slot, &mbi, sizeof(mbi)) &&
+                    (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE));
+    // All copies of the show method are virtual; the real one is the one MainMenu's code calls
+    // through its vtable slot.
+    int called = 0;
+    for (const MethodInfo* m : r.showCandidates)
+    {
+        void** s = FindVtableSlot(r.confirmClass, m);
+        int32_t slotOff = s ? static_cast<int32_t>(reinterpret_cast<char*>(s) - reinterpret_cast<char*>(r.confirmClass)) : -1;
+        int calls = s ? CountVirtualCalls(r.mainMenu, slotOff) : 0;
+        Log("  show candidate RVA 0x%llx: vtable +0x%x, %d virtual calls from MainMenu",
+            static_cast<unsigned long long>(Rva(il2cpp_method_pointer(m))), slotOff, calls);
+        if (calls > 0)
+        {
+            r.showDialog = m;
+            ++called;
+        }
+    }
+    Log("menu: confirm slot at class+0x%llx (BaseMenu +0x%llx) writable=%d, show candidates called by MainMenu=%d of %zu",
+        static_cast<long long>(off), static_cast<long long>(baseOff), writable, called, r.showCandidates.size());
+    if (!slot || off != baseOff || !writable || called != 1)
+    {
+        Log("menu: vtable check failed, no Encore menu entry");
+        r.showDialog = nullptr;
+        return false;
+    }
+    g_origConfirm = reinterpret_cast<ConfirmFn>(*slot);
+    *slot = reinterpret_cast<void*>(&HookedConfirm);
+    Log("menu: confirm hook installed (show dialog RVA 0x%llx)",
+        static_cast<unsigned long long>(Rva(il2cpp_method_pointer(r.showDialog))));
+    return true;
+}
+
+static Il2CppObject* TransformOf(Il2CppObject* component)
+{
+    return component ? Invoke(g_menu.getTransform, component, nullptr) : nullptr;
+}
+
+static bool LocalPosition(Il2CppObject* t, float out[3])
+{
+    Il2CppObject* boxed = t ? Invoke(g_menu.getLocalPos, t, nullptr) : nullptr;
+    if (!boxed)
+        return false;
+    memcpy(out, il2cpp_object_unbox(boxed), 3 * sizeof(float));
+    return true;
+}
+
+static bool IsAncestor(Il2CppObject* ancestor, Il2CppObject* t)
+{
+    for (int depth = 0; t && depth < 32; ++depth)
+    {
+        t = Invoke(g_menu.getParent, t, nullptr);
+        if (t == ancestor)
+            return true;
+    }
+    return false;
+}
+
+// Instantiates a copy of component (with its GameObject) next to the original and moves it one
+// step further than the original is from prev.
+static Il2CppObject* CloneAfter(Il2CppObject* component, Il2CppObject* prev)
+{
+    Il2CppObject* t = TransformOf(component);
+    Il2CppObject* parent = t ? Invoke(g_menu.getParent, t, nullptr) : nullptr;
+    float last[3], before[3];
+    if (!parent || !LocalPosition(t, last) || !LocalPosition(TransformOf(prev), before))
+        return nullptr;
+    Il2CppObject* clone;
+    if (g_menu.instantiate)
+    {
+        bool worldPositionStays = false;
+        void* args[] = {component, parent, &worldPositionStays};
+        clone = Invoke(g_menu.instantiate, nullptr, args);
+    }
+    else
+    {
+        void* args[] = {component};
+        clone = Invoke(g_menu.instantiate1, nullptr, args);
+        bool worldPositionStays = false;
+        void* parentArgs[] = {parent, &worldPositionStays};
+        if (Il2CppObject* t1 = TransformOf(clone))
+            Invoke(g_menu.setParent, t1, parentArgs);
+    }
+    Il2CppObject* ct = TransformOf(clone);
+    if (!ct)
+        return nullptr;
+    float pos[3] = {2 * last[0] - before[0], 2 * last[1] - before[1], 2 * last[2] - before[2]};
+    void* posArgs[] = {pos};
+    Invoke(g_menu.setLocalPos, ct, posArgs);
+    return clone;
+}
+
+static Il2CppObject* ChildComponent(Il2CppObject* component, Il2CppObject* array)
+{
+    if (!g_menu.inChildren)
+    {
+        Log("menu: entry text and background are nested, but Component.GetComponentInChildren(Type) is not available");
+        return nullptr;
+    }
+    Il2CppClass* elem = il2cpp_class_get_element_class(il2cpp_object_get_class(array));
+    void* args[] = {il2cpp_type_get_object(il2cpp_class_get_type(elem))};
+    return Invoke(g_menu.inChildren, component, args);
+}
+
+static bool HasEncoreEntry(Il2CppObject* strings)
+{
+    for (int i = 0; i < ArrayLength(strings); ++i)
+        if (WideString(reinterpret_cast<Il2CppString*>(ArrayItem(strings, i))) == kEntryLabel)
+            return true;
+    return false;
+}
+
+// The cloned entry of the current main menu and the entry it was copied from. The menu slides its
+// entries in whenever it opens; MenuTick keeps the copy one step after its source.
+struct ClonedEntry
+{
+    Il2CppObject* menu = nullptr;
+    Il2CppObject* srcText = nullptr;
+    Il2CppObject* text = nullptr;
+    Il2CppObject* srcBg = nullptr;
+    Il2CppObject* bg = nullptr;
+    Il2CppObject* srcTextBefore = nullptr; // the entries before the sources, for the step
+    Il2CppObject* srcBgBefore = nullptr;
+};
+static ClonedEntry g_clone;
+
+// The menu slides its entries in when it opens. The last entry is copied only after the last two
+// entries' positions have stayed the same for a few ticks and are apart.
+struct SettleWatch
+{
+    Il2CppObject* menu = nullptr;
+    float last[3] = {}, prev[3] = {};
+    int stableTicks = 0;
+};
+static SettleWatch g_settle;
+
+static bool LocalPosition(Il2CppObject* t, float out[3]);
+static Il2CppObject* TransformOf(Il2CppObject* component);
+
+static bool EntriesSettled(Il2CppObject* menu, Il2CppObject* lastText, Il2CppObject* prevText)
+{
+    float last[3], prev[3];
+    if (!LocalPosition(TransformOf(lastText), last) || !LocalPosition(TransformOf(prevText), prev))
+        return false;
+    if (g_settle.menu != menu || memcmp(last, g_settle.last, sizeof(last)) != 0 || memcmp(prev, g_settle.prev, sizeof(prev)) != 0)
+    {
+        g_settle.menu = menu;
+        memcpy(g_settle.last, last, sizeof(last));
+        memcpy(g_settle.prev, prev, sizeof(prev));
+        g_settle.stableTicks = 0;
+        return false;
+    }
+    float dx = last[0] - prev[0], dy = last[1] - prev[1];
+    return ++g_settle.stableTicks >= 3 && dx * dx + dy * dy > 1.0f;
+}
+
+// Puts a copied element one step after the source element (same step as source minus the one
+// before it), as when it was created.
+static void PlaceAfter(Il2CppObject* clone, Il2CppObject* src, Il2CppObject* before)
+{
+    Il2CppObject* ct = TransformOf(clone);
+    float last[3], prev[3], cur[3];
+    if (!ct || !LocalPosition(TransformOf(src), last) || !LocalPosition(TransformOf(before), prev) || !LocalPosition(ct, cur))
+        return;
+    float pos[3] = {2 * last[0] - prev[0], 2 * last[1] - prev[1], 2 * last[2] - prev[2]};
+    if (memcmp(pos, cur, sizeof(pos)) == 0)
+        return;
+    void* args[] = {pos};
+    Invoke(g_menu.setLocalPos, ct, args);
+}
+
+// Keeps the copied entry with its source while the menu animates its entries (on every return to
+// the main menu).
+static void SyncClonedEntry(Il2CppObject* menu)
+{
+    if (menu != g_clone.menu)
+        return;
+    PlaceAfter(g_clone.text, g_clone.srcText, g_clone.srcTextBefore);
+    if (g_clone.bg)
+        PlaceAfter(g_clone.bg, g_clone.srcBg, g_clone.srcBgBefore);
+}
+
+// Appends "Encore" to a live main menu. Uses a spare text object if there is one, otherwise
+// clones the last entry's text and background.
+static void AddMenuEntry(Il2CppObject* menu)
+{
+    MenuRefs& r = g_menu;
+    Il2CppObject* strings = GetField<Il2CppObject*>(menu, r.menuStrings);
+    Il2CppObject* tips = GetField<Il2CppObject*>(menu, r.tipStrings);
+    Il2CppObject* texts = GetField<Il2CppObject*>(menu, r.textObjects);
+    Il2CppObject* bgs = GetField<Il2CppObject*>(menu, r.backgrounds);
+    if (!strings || HasEncoreEntry(strings) || menu == g_menuRefused)
+        return;
+    int n = ArrayLength(strings), nt = ArrayLength(texts), nb = ArrayLength(bgs);
+    int visible = GetField<int>(menu, r.visibleCount), maxScroll = GetField<int>(menu, r.maxScroll);
+    int expectVisible = (std::min)(n, nt), expectMax = n > nt ? n - nt : 0;
+    bool started = visible == expectVisible && maxScroll == expectMax;
+    bool notStarted = visible == 0 && maxScroll == 0;
+    static Il2CppObject* loggedFor = nullptr; // log the layout once per menu instance, not every tick
+    if (loggedFor != menu)
+        Log("menu: main menu has %d entries, %d text objects, %d backgrounds, %d tips; visible=%d max scroll=%d "
+            "(expected %d/%d)", n, nt, nb, ArrayLength(tips), visible, maxScroll, expectVisible, expectMax);
+    loggedFor = menu;
+    if (n < 2 || nt < 2 || (!started && !notStarted) || (nb != 0 && nb != nt))
+    {
+        Log("menu: main menu layout not as analysed, entry not added");
+        g_menuRefused = menu;
+        return;
+    }
+
+    Il2CppObject* newTexts = nullptr;
+    Il2CppObject* newBgs = nullptr;
+    Il2CppObject* text = nullptr; // text object of the new entry
+    if (nt > n)
+        text = ArrayItem(texts, n); // spare text object, hidden while it has no string
+    else
+    {
+        if (!r.instantiate && !(r.instantiate1 && r.setParent))
+        {
+            Log("menu: no spare text object and no usable Object.Instantiate, entry not added");
+            g_menuRefused = menu;
+            return;
+        }
+        int last = nt - 1;
+        Il2CppObject* lt = ArrayItem(texts, last);
+        Il2CppObject* lb = nb ? ArrayItem(bgs, last) : nullptr;
+        if (!EntriesSettled(menu, lt, ArrayItem(texts, last - 1)))
+            return; // still animating; try again on the next tick
+        Il2CppObject* bg = nullptr;
+        bool bgHoldsText = lb && IsAncestor(TransformOf(lb), TransformOf(lt));
+        bool textHoldsBg = lb && !bgHoldsText && IsAncestor(TransformOf(lt), TransformOf(lb));
+        Log("menu: cloning the last entry (background %s text)",
+            bgHoldsText ? "contains the" : textHoldsBg ? "is inside the" : !lb ? "missing, only" : "separate from the");
+        if ((bgHoldsText || textHoldsBg) && !r.inChildren)
+        {
+            Log("menu: entry text and background are nested, but Component.GetComponentInChildren(Type) is not "
+                "available; entry not added");
+            g_menuRefused = menu;
+            return;
+        }
+        if (bgHoldsText)
+        {
+            bg = CloneAfter(lb, ArrayItem(bgs, last - 1));
+            text = bg ? ChildComponent(bg, texts) : nullptr;
+        }
+        else if (textHoldsBg)
+        {
+            text = CloneAfter(lt, ArrayItem(texts, last - 1));
+            bg = text ? ChildComponent(text, bgs) : nullptr;
+        }
+        else
+        {
+            // A clone becomes its parent's last child, and later children are drawn on top: clone
+            // the background first so the label is drawn over it.
+            bg = lb ? CloneAfter(lb, ArrayItem(bgs, last - 1)) : nullptr;
+            text = CloneAfter(lt, ArrayItem(texts, last - 1));
+        }
+        if (!text || (lb && !bg))
+        {
+            Log("menu: cloning the last entry failed (text=%p background=%p), entry not added", text, bg);
+            g_menuRefused = menu;
+            return;
+        }
+        newTexts = ArrayAppend(texts, text);
+        newBgs = lb ? ArrayAppend(bgs, bg) : nullptr;
+        g_clone = {menu, lt, text, lb, bg, ArrayItem(texts, last - 1), lb ? ArrayItem(bgs, last - 1) : nullptr};
+    }
+    Il2CppObject* newStrings = ArrayAppend(strings, reinterpret_cast<Il2CppObject*>(il2cpp_string_new(kEntryLabelUtf8)));
+    Il2CppObject* newTips =
+        tips && ArrayLength(tips) == n ? ArrayAppend(tips, reinterpret_cast<Il2CppObject*>(il2cpp_string_new(kEntryTip))) : nullptr;
+    if (!newStrings || (nt <= n && !newTexts) || (nt <= n && nb && !newBgs) || (tips && ArrayLength(tips) == n && !newTips))
+    {
+        Log("menu: allocating arrays failed, entry not added");
+        g_menuRefused = menu;
+        return;
+    }
+    if (newTexts)
+        il2cpp_field_set_value(menu, r.textObjects, newTexts);
+    if (newBgs)
+        il2cpp_field_set_value(menu, r.backgrounds, newBgs);
+    if (newTips)
+        il2cpp_field_set_value(menu, r.tipStrings, newTips);
+    il2cpp_field_set_value(menu, r.menuStrings, newStrings);
+    if (started)
+    {
+        // Same formula as the game's own count method; before Start the game computes it itself.
+        int total = n + 1, textCount = ArrayLength(GetField<Il2CppObject*>(menu, r.textObjects));
+        int v = (std::min)(total, textCount), m = total > textCount ? total - textCount : 0;
+        il2cpp_field_set_value(menu, r.visibleCount, &v);
+        il2cpp_field_set_value(menu, r.maxScroll, &m);
+    }
+    std::string label = GetField<bool>(menu, r.useUppercase) ? "ENCORE" : kEntryLabelUtf8;
+    void* textArgs[] = {il2cpp_string_new(label.c_str())};
+    Invoke(r.setText, text, textArgs);
+    Log("menu: added \"%s\" as entry %d (%s)", kEntryLabelUtf8, n + 1, nt > n ? "spare text object" : "cloned the last entry");
+}
+
+// Timer: finds the live main menu (it is created again whenever the menu scene loads), installs
+// the hook once and adds the entry to each new MainMenu instance.
+static void MenuTick()
+{
+    MenuRefs& r = g_menu;
+    if (!r.resolved || r.disabled)
+        return;
+    Il2CppObject* menu = FindActiveInstance(r.mainMenu);
+    if (!menu)
+        return;
+    if (!r.hooked)
+    {
+        r.hooked = InstallMenuHook();
+        if (!r.hooked)
+        {
+            r.disabled = true;
+            KillTimer(g_unityWnd, kMenuTimer);
+            return;
+        }
+    }
+    AddMenuEntry(menu);
+    SyncClonedEntry(menu);
+}
+
+
+// The player confirmed "Encore": start the companion (worker thread) and show the result later.
+static void MenuEncoreSelected(Il2CppObject* menu)
+{
+    Il2CppObject* songScan = GetField<Il2CppObject*>(menu, g_menu.mmSongScan);
+    if (songScan && GetField<bool>(songScan, g_refs.waitForFinish))
+        return; // the game ignores menu input while the scan overlay shows, too
+    if (!RequestCompanionPairing(g_unityWnd, WM_ENCORE_COMPANION, TriggerPort()))
+    {
+        Log("menu: Encore selected, pairing request already running");
+        return;
+    }
+    Log("menu: Encore selected, asking the companion for a pairing code");
+}
+
+static bool MenuGameObjectActive(Il2CppObject* go)
+{
+    Il2CppObject* boxed = go ? Invoke(g_menu.activeSelf, go, nullptr) : nullptr;
+    return boxed && *static_cast<bool*>(il2cpp_object_unbox(boxed));
+}
+
+static void ShowCompanionDialog(const CompanionResult& res)
+{
+    MenuRefs& r = g_menu;
+    Il2CppObject* menu = r.showDialog ? FindActiveInstance(r.mainMenu) : nullptr;
+    if (!menu)
+    {
+        Log("menu: main menu gone, pairing dialog not shown");
+        return;
+    }
+    for (FieldInfo* f : r.subMenus)
+        if (MenuGameObjectActive(GetField<Il2CppObject*>(menu, f)))
+        {
+            Log("menu: another menu is open, pairing dialog not shown");
+            return;
+        }
+    // MainMenu has several ConfirmationMenu dialogs; MainMenu.Update blocks menu input while any
+    // of them is open. confirmMenu has no body text object (the game always passes null there), so
+    // take the first dialog that has one, and confirmMenu with everything in the title otherwise.
+    Il2CppObject* dialog = nullptr;
+    const char* dialogName = "";
+    for (FieldInfo* f : r.dialogs)
+    {
+        Il2CppObject* d = GetField<Il2CppObject*>(menu, f);
+        if (d && GetField<bool>(d, r.isActive))
+        {
+            Log("menu: a dialog is already open, pairing dialog not shown");
+            return;
+        }
+        if (d && !dialog && GetField<Il2CppObject*>(d, r.dialogBody) && GetField<Il2CppObject*>(d, r.dialogTitle))
+        {
+            dialog = d;
+            dialogName = il2cpp_field_get_name(f);
+        }
+    }
+    bool titleOnly = !dialog;
+    if (titleOnly)
+    {
+        dialog = GetField<Il2CppObject*>(menu, r.confirmMenu);
+        dialogName = "confirmMenu, title only";
+    }
+    if (!dialog || !GetField<Il2CppObject*>(dialog, r.dialogTitle))
+    {
+        Log("menu: no usable dialog, pairing dialog not shown");
+        return;
+    }
+    std::string body;
+    if (res.ok)
+    {
+        std::string url = res.url;
+        if (!url.empty() && url.back() == '/')
+            url.pop_back();
+        body = "On your phone (same Wi-Fi), open\n" + (url.empty() ? std::string("(no network address found)") : url) +
+               "\nand enter the code\n" + res.code.substr(0, 3) + " " + res.code.substr(3) + "\n\nThe code works once and expires in " +
+               std::to_string(res.expiresMinutes > 0 ? res.expiresMinutes : 10) + " minutes.";
+        if (res.started)
+            body += " The companion runs in its own window; close it to stop it.";
+    }
+    else
+        body = res.error + "\n\nSee encore.log and the README for how to set up the companion.";
+    std::string title = titleOnly ? "Encore companion\n" + body : "Encore companion";
+    void* args[] = {il2cpp_string_new(title.c_str()), il2cpp_string_new("OK"), nullptr, nullptr, nullptr,
+                    titleOnly ? nullptr : il2cpp_string_new(body.c_str())};
+    Invoke(r.showDialog, dialog, args);
+    Log("menu: pairing dialog (%s, %s) %s", res.ok ? "code" : "error", dialogName, g_invokeFailed ? "FAILED" : "shown");
+}
+
 static bool DumpRequested()
 {
     wchar_t v[8];
@@ -1422,6 +2283,12 @@ static void OnMainThreadInit(HWND hwnd)
             Log("queue ready: POST /queue adds a song to the setlist, GET /setlist shows it");
             LogLibraryState("startup");
         }
+        // ENCORE_MENU=0 leaves the main menu untouched.
+        wchar_t menuEnv[4];
+        if (GetEnvironmentVariableW(L"ENCORE_MENU", menuEnv, 4) > 0 && menuEnv[0] == L'0')
+            Log("menu: Encore menu entry off (ENCORE_MENU=0)");
+        else if (ResolveMenuRefs(game))
+            SetTimer(hwnd, kMenuTimer, 500, nullptr);
     }
 }
 
@@ -1441,6 +2308,19 @@ static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_TIMER && wp == kRestoreTimer)
     {
         RestoreSetlistIfScanDone();
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kMenuTimer)
+    {
+        MenuTick();
+        return 0;
+    }
+    // Posted by the companion launcher thread.
+    if (msg == WM_ENCORE_COMPANION)
+    {
+        auto* res = reinterpret_cast<CompanionResult*>(lp);
+        ShowCompanionDialog(*res);
+        delete res;
         return 0;
     }
     // Sent by the HTTP listener thread with SendMessageTimeout; handled here on the main thread.

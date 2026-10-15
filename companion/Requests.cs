@@ -89,7 +89,8 @@ sealed class StreamRequests
     public string? FeedProblem { get; private set; }
 
     public sealed record SetlistSong(string Title, string Artist, string Checksum);
-    public sealed record SetlistSnapshot(bool Playing, int Index, List<SetlistSong> Songs);
+    public sealed record SetlistSnapshot(bool Playing, int Index, List<SetlistSong> Songs, bool CurrentKnown = false,
+                                         SetlistSong? Current = null, string? Scene = null);
 
     public StreamRequests(IHttpClientFactory pick, DownloadManager downloads)
     {
@@ -370,11 +371,8 @@ sealed class StreamRequests
     {
         lock (_gate)
         {
-            var s = Setlist;
-            if (s == null || !s.Playing || s.Index < 0 || s.Index >= s.Songs.Count)
-                return "No setlist is playing right now.";
-            var song = s.Songs[s.Index];
-            var req = PlayingLocked();
+            if (NowLocked() is not (var song, var req))
+                return "No song is playing right now.";
             return $"Now playing: {SongText(song.Title, song.Artist)}" + (req != null ? $" (requested by {req.Display})" : "");
         }
     }
@@ -415,7 +413,7 @@ sealed class StreamRequests
                 feedProblem = FeedProblem,
                 pending = _requests.Where(r => r.State == "pending").OrderBy(r => r.Created).Select(View).ToList(),
                 missing = _requests.Where(r => r.State is "missing" or "downloading").OrderBy(r => r.Created).Select(View).ToList(),
-                playing = PlayingLocked() is { } p ? View(p) : null,
+                now = NowLocked() is (var song, var by) ? new { title = Norm(song.Title), artist = Norm(song.Artist), user = by?.Display, scene = Setlist?.Scene } : null,
                 upcoming = upcoming.Select(View).ToList(),
                 history = _requests.Where(r => !r.IsOpen && r.State != "playing").OrderByDescending(r => r.Updated).Take(30).Select(View).ToList(),
             };
@@ -430,10 +428,10 @@ sealed class StreamRequests
             var s = Setlist;
             object? now = null;
             var next = new List<object>();
+            if (NowLocked() is (var song, var by))
+                now = new { title = Norm(song.Title), artist = Norm(song.Artist), requestedBy = by?.Display };
             if (s != null && s.Playing && s.Index >= 0 && s.Index < s.Songs.Count)
             {
-                var song = s.Songs[s.Index];
-                now = new { title = Norm(song.Title), artist = Norm(song.Artist), requestedBy = PlayingLocked()?.Display };
                 for (int i = s.Index + 1; i < s.Songs.Count; ++i)
                 {
                     var req = _requests.FirstOrDefault(r => r.State == "queued" && r.Position == i + 1);
@@ -680,10 +678,33 @@ sealed class StreamRequests
     {
         using var doc = JsonDocument.Parse(body);
         var r = doc.RootElement;
-        var songs = r.GetProperty("songs").EnumerateArray().Select(s => new SetlistSong(
-            s.GetProperty("title").GetString() ?? "", s.GetProperty("artist").GetString() ?? "",
-            s.GetProperty("checksum").GetString() ?? "")).ToList();
-        return new SetlistSnapshot(r.GetProperty("playing").GetBoolean(), r.GetProperty("index").GetInt32(), songs);
+        static SetlistSong Song(JsonElement s) => new(s.GetProperty("title").GetString() ?? "", s.GetProperty("artist").GetString() ?? "",
+                                                      s.GetProperty("checksum").GetString() ?? "");
+        var songs = r.GetProperty("songs").EnumerateArray().Select(Song).ToList();
+        // "current" (the song on screen, also in quickplay) is missing in Pick builds before it.
+        bool known = r.TryGetProperty("current", out var cur);
+        return new SetlistSnapshot(r.GetProperty("playing").GetBoolean(), r.GetProperty("index").GetInt32(), songs, known,
+                                   known && cur.ValueKind == JsonValueKind.Object ? Song(cur) : null,
+                                   r.TryGetProperty("scene", out var sc) && sc.ValueKind == JsonValueKind.String ? sc.GetString() : null);
+    }
+
+    // The song on screen and, if a viewer requested it, that request. From Pick's "current"; older
+    // Pick builds only report the setlist position.
+    (SetlistSong song, SongRequest? by)? NowLocked()
+    {
+        var s = Setlist;
+        if (s == null)
+            return null;
+        var song = s.CurrentKnown ? s.Current
+                 : s.Playing && s.Index >= 0 && s.Index < s.Songs.Count ? s.Songs[s.Index] : null;
+        if (song == null)
+            return null;
+        bool Same(SongRequest r) => string.Equals(r.Checksum, song.Checksum, StringComparison.OrdinalIgnoreCase);
+        // The setlist's playing request first; otherwise an open request for the same song that the
+        // streamer started by hand (quickplay).
+        var by = _requests.FirstOrDefault(r => r.State == "playing" && Same(r)) ??
+                 _requests.Where(r => r.IsOpen && Same(r)).OrderBy(r => r.Created).FirstOrDefault();
+        return (song, by);
     }
 
     void Save()

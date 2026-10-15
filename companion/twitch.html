@@ -301,14 +301,14 @@ function render(d) {
 
   // Now playing
   const now = [];
-  if (rq.setlist && rq.setlist.playing && rq.setlist.songs[rq.setlist.index]) {
-    const song = rq.setlist.songs[rq.setlist.index];
-    const li = songItem({ title: song.title, artist: song.artist, user: rq.playing ? rq.playing.user : null });
+  if (rq.now) {
+    const li = songItem({ title: rq.now.title, artist: rq.now.artist, user: rq.now.user });
     li.classList.add("now");
-    if (rq.playing) li.append(el("div", "btns"));
+    if (rq.now.scene === "end_screen") li.querySelector(".song").append(el("div", "meta", "End screen"));
+    if (rq.setlist && !rq.setlist.playing) li.querySelector(".song").append(el("div", "meta", "Single song (quickplay): requests wait until a setlist plays."));
     now.push(li);
   }
-  fill($("now"), now, "No setlist is playing. Requests are added to the setlist; see the README for stream mode.");
+  fill($("now"), now, "No song is playing. Requests are added to a setlist; see the README for stream mode.");
 
   // Pending
   $("pending-count").hidden = !rq.pending.length;

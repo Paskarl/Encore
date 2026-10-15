@@ -228,7 +228,7 @@ the pairing page when a new token is created; Encore passes it).
 
 #### Start the companion from the main menu
 
-Encore adds an **Encore** entry at the bottom of Clone Hero's main menu. Selecting it starts the
+Encore adds an **Encore** entry to Clone Hero's main menu, below Practice. Selecting it starts the
 companion if it isn't running (in its own minimized console window; close that window to stop it)
 and shows a dialog with the companion's address and a 6-digit code. On the phone, open the
 address and enter the code; the page remembers the pairing.

@@ -1421,6 +1421,7 @@ static const UINT_PTR kMenuTimer = 0x4C4B;
 static const wchar_t kEntryLabel[] = L"Encore";
 static const char kEntryLabelUtf8[] = "Encore";
 static const char kEntryTip[] = "Start the phone companion and pair a phone";
+static const wchar_t kInsertAfter[] = L"Practice"; // menu key the entry goes after; appended if absent
 
 using ConfirmFn = void (*)(Il2CppObject*, const MethodInfo*);
 static unsigned short TriggerPort();
@@ -1459,6 +1460,9 @@ struct MenuRefs
     const MethodInfo* setLocalPos = nullptr;
     const MethodInfo* inChildren = nullptr;  // Component.GetComponentInChildren(Type)
     const MethodInfo* setText = nullptr;     // TMP_Text.set_text
+    const MethodInfo* getText = nullptr;     // TMP_Text.get_text (optional: without it the entry goes last)
+    FieldInfo* scroll = nullptr;             // 1st Int32 field of BaseMenu
+    FieldInfo* selected = nullptr;           // 2nd Int32 field of BaseMenu
     const MethodInfo* activeSelf = nullptr;
     bool resolved = false; // static part done
     bool hooked = false;
@@ -1479,17 +1483,21 @@ static Il2CppObject*& ArrayItem(Il2CppObject* a, int i)
 }
 
 // A copy of a reference-type array with one more element.
-static Il2CppObject* ArrayAppend(Il2CppObject* arr, Il2CppObject* extra)
+static Il2CppObject* ArrayInsert(Il2CppObject* arr, int pos, Il2CppObject* extra)
 {
     Il2CppClass* elem = il2cpp_class_get_element_class(il2cpp_object_get_class(arr));
     int n = ArrayLength(arr);
-    Il2CppObject* out = elem ? il2cpp_array_new(elem, n + 1) : nullptr;
+    Il2CppObject* out = elem && pos >= 0 && pos <= n ? il2cpp_array_new(elem, n + 1) : nullptr;
     if (!out)
         return nullptr;
-    for (int i = 0; i < n; ++i)
-        il2cpp_gc_wbarrier_set_field(out, reinterpret_cast<void**>(&ArrayItem(out, i)), ArrayItem(arr, i));
-    il2cpp_gc_wbarrier_set_field(out, reinterpret_cast<void**>(&ArrayItem(out, n)), extra);
+    for (int i = 0, j = 0; i <= n; ++i)
+        il2cpp_gc_wbarrier_set_field(out, reinterpret_cast<void**>(&ArrayItem(out, i)), i == pos ? extra : ArrayItem(arr, j++));
     return out;
+}
+
+static Il2CppObject* ArrayAppend(Il2CppObject* arr, Il2CppObject* extra)
+{
+    return ArrayInsert(arr, ArrayLength(arr), extra);
 }
 
 // The machine code of the function starting at fn. Its extent comes from the x64 unwind tables:
@@ -1664,6 +1672,8 @@ static bool ResolveMenuRefs(const Il2CppImage* game)
             ints.push_back(f);
     if (ints.size() >= 4 && il2cpp_field_get_offset(ints[3]) == il2cpp_field_get_offset(ints[2]) + 4)
     {
+        r.scroll = ints[0];
+        r.selected = ints[1];
         r.maxScroll = ints[2];
         r.visibleCount = ints[3];
     }
@@ -1751,7 +1761,10 @@ static bool ResolveMenuRefs(const Il2CppImage* game)
     if (gameObject)
         r.activeSelf = FindMethod(gameObject, "get_activeSelf", {});
     if (tmpText)
+    {
         r.setText = FindMethod(tmpText, "set_text", {"System.String"});
+        r.getText = FindMethod(tmpText, "get_text", {});
+    }
 
     // Required pieces; cloning (Instantiate, GetComponentInChildren) is checked when it is needed.
     std::string missing;
@@ -2035,6 +2048,19 @@ static void AddMenuEntry(Il2CppObject* menu)
         g_menuRefused = menu;
         return;
     }
+    // Position: after the kInsertAfter entry if there is one, else last. Inserting shifts the
+    // labels of the rows below by one, which needs TMP_Text.get_text and an unscrolled menu.
+    int scroll = GetField<int>(menu, r.scroll);
+    int pos = n;
+    for (int i = 0; i < n; ++i)
+        if (SameText(WideString(reinterpret_cast<Il2CppString*>(ArrayItem(strings, i))), kInsertAfter))
+            pos = i + 1;
+    if (pos < n && (!r.getText || scroll != 0 || maxScroll != 0))
+        pos = n;
+    // Rows below the insert point change their entry; wait until the highlight is above it, so the
+    // highlighted entry stays the same.
+    if (started && pos < n && scroll + GetField<int>(menu, r.selected) >= pos)
+        return;
 
     Il2CppObject* newTexts = nullptr;
     Il2CppObject* newBgs = nullptr;
@@ -2093,9 +2119,10 @@ static void AddMenuEntry(Il2CppObject* menu)
         newBgs = lb ? ArrayAppend(bgs, bg) : nullptr;
         g_clone = {menu, lt, text, lb, bg, ArrayItem(texts, last - 1), lb ? ArrayItem(bgs, last - 1) : nullptr};
     }
-    Il2CppObject* newStrings = ArrayAppend(strings, reinterpret_cast<Il2CppObject*>(il2cpp_string_new(kEntryLabelUtf8)));
-    Il2CppObject* newTips =
-        tips && ArrayLength(tips) == n ? ArrayAppend(tips, reinterpret_cast<Il2CppObject*>(il2cpp_string_new(kEntryTip))) : nullptr;
+    Il2CppObject* newStrings = ArrayInsert(strings, pos, reinterpret_cast<Il2CppObject*>(il2cpp_string_new(kEntryLabelUtf8)));
+    Il2CppObject* newTips = tips && ArrayLength(tips) == n
+                                ? ArrayInsert(tips, pos, reinterpret_cast<Il2CppObject*>(il2cpp_string_new(kEntryTip)))
+                                : nullptr;
     if (!newStrings || (nt <= n && !newTexts) || (nt <= n && nb && !newBgs) || (tips && ArrayLength(tips) == n && !newTips))
     {
         Log("menu: allocating arrays failed, entry not added");
@@ -2117,10 +2144,20 @@ static void AddMenuEntry(Il2CppObject* menu)
         il2cpp_field_set_value(menu, r.visibleCount, &v);
         il2cpp_field_set_value(menu, r.maxScroll, &m);
     }
+    // Show the new layout right away (the game redraws the labels on the next navigation): the rows
+    // from the insert point down take the label of the row above, the insert row gets ours.
+    Il2CppObject* rows = GetField<Il2CppObject*>(menu, r.textObjects);
+    int shown = (std::min)(n + 1, ArrayLength(rows));
+    for (int i = shown - 1; i > pos; --i)
+    {
+        void* args[] = {Invoke(r.getText, ArrayItem(rows, i - 1), nullptr)};
+        Invoke(r.setText, ArrayItem(rows, i), args);
+    }
     std::string label = GetField<bool>(menu, r.useUppercase) ? "ENCORE" : kEntryLabelUtf8;
     void* textArgs[] = {il2cpp_string_new(label.c_str())};
-    Invoke(r.setText, text, textArgs);
-    Log("menu: added \"%s\" as entry %d (%s)", kEntryLabelUtf8, n + 1, nt > n ? "spare text object" : "cloned the last entry");
+    Invoke(r.setText, pos < shown ? ArrayItem(rows, pos) : text, textArgs);
+    Log("menu: added \"%s\" as entry %d of %d (%s)", kEntryLabelUtf8, pos + 1, n + 1,
+        nt > n ? "spare text object" : "cloned the last row");
 }
 
 // Timer: finds the live main menu (it is created again whenever the menu scene loads), installs

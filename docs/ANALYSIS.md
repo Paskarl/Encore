@@ -452,8 +452,14 @@ bool)`, `get_parent`, `get_localPosition`/`set_localPosition`, `TMP_Text.set_tex
   `Instantiate(…, parent, false)` and places them one step below (step = last row minus the one
   before). Order matters: a clone becomes its parent's last child and is drawn on top, so cloning
   the label first put the background over it (label dimmed, hidden when highlighted). It then
-  appends to `menuStrings`, `textObjects` and `backgroundObjects` (new arrays) and sets visible
-  count / max scroll by the count formula, after checking that the live values match that formula.
+  appends the new row to `textObjects` and `backgroundObjects`, inserts the "Encore" key into
+  `menuStrings` after the "Practice" key (5th of 8; appended if that key is missing), and sets
+  visible count / max scroll by the count formula, after checking that the live values match that
+  formula. Rows draw `menuStrings[i]`, so the rows below shift one down and the copied row shows
+  Quit; Encore relabels them at once (TMP `get_text`/`set_text`) and inserts only while the
+  highlight is above the insert point. MainMenu never selects an entry by index (no
+  `call [reg+0x458]` "select index" or writes to the selection fields in its code; `0x1d55b0`
+  selects by string), and the confirm method dispatches by key, so the order is free.
 - **Intro animation:** the menu slides its rows in when it opens. Cloning during the slide put
   the copy on top of Quit (step 0); Encore waits until the last two rows' positions have been
   stable for three ticks (1.5 s) and keeps the copy one step below its source afterwards (the

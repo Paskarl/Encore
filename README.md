@@ -47,6 +47,8 @@ Pick is meant to become the bridge between Clone Hero and external tools:
 | Companion web app, step 2: find missing charts on enchor.us, download and queue them | **Working** (tested from a phone), see [Download missing charts](#download-missing-charts) |
 | "Pick" main-menu entry: starts the companion, shows address and pairing code in the game | **Working** (tested in the game), see [Start the companion from the main menu](#start-the-companion-from-the-main-menu) |
 | Remote song queueing (`POST /queue`, `GET /setlist`) | **Prototype working**: queues into the game's setlist from the song list and while a setlist plays, see [Queue songs](#queue-songs) |
+| Twitch song requests: `!sr` in chat, moderation dashboard, OBS overlay | **MVP**, tested against a simulated game; live Twitch test pending, see [Twitch song requests](#twitch-song-requests) |
+| Twitch voting, polls, channel points, predictions | Planned |
 
 Pick does two things:
 - start the same full scan as *Settings → General → Scan Songs* while the song list is open,
@@ -147,7 +149,8 @@ more, because the companion has a new name (*PickCompanion*); you can remove the
 1. Close Clone Hero and the companion window.
 2. In the Clone Hero folder, delete `version.dll`, the `PickCompanion` folder, the `Pick-*`
    files and `pick.log`.
-3. Optional: delete `%LOCALAPPDATA%\Pick` (pairing token and download list), and the
+3. Optional: log out of Twitch on the request dashboard, then delete `%LOCALAPPDATA%\Pick`
+   (pairing token, download list, Twitch login and requests), and the
    firewall entry for *PickCompanion* (*Allow an app through firewall*).
 
 Charts downloaded from enchor.us stay in `Pick Downloads` inside your songs folder; keep them or
@@ -383,6 +386,79 @@ and keeps its use small:
   says when to try again);
 - it identifies itself as `PickCompanion/0.2 (+https://github.com/Paskarl/clonehero-pick)`.
 
+### Twitch song requests
+
+Viewers request songs in your Twitch chat, you approve them on a dashboard, and an OBS overlay
+shows what's playing and who asked for it. Everything runs in the companion; the game DLL has no
+Twitch code.
+
+#### One-time setup
+
+1. **Register a Twitch application** (Twitch needs one for every app that logs in): open
+   <https://dev.twitch.tv/console/apps>, *Register Your Application*, name it (e.g.
+   "Pick for &lt;your channel&gt;"), OAuth Redirect URL `http://localhost`, category *Other*,
+   **Client Type: Public**. Copy the *Client ID*. (It is not a secret; there is no client secret
+   to copy.)
+2. Start the companion (PICK in the main menu, or `dotnet run`) and open
+   **`http://localhost:47322/twitch`** in a browser on the PC.
+3. Paste the client ID and click **Log in with Twitch**. The page shows a code; open the link,
+   log in with the account you stream on and enter the code. Pick asks only for
+   `user:read:chat` and `user:write:chat` (read your chat, answer in it). The login is kept in
+   `%LOCALAPPDATA%\Pick\twitch-token.json`; **Log out** on the dashboard revokes it.
+4. OBS: add a **Browser** source with the URL `http://localhost:47322/overlay` (600 × 400 works
+   well). The background is transparent. `?queue=0` shows only the next song, `?max=3` limits
+   the list. OBS on another PC: `http://<PC address>:47322/overlay#token=<pairing token>`.
+
+#### Chat commands
+
+| Command | What it does |
+|---|---|
+| `!sr <title>` / `!sr <title> <artist>` (or `!songrequest`) | Searches the library. One match (or one exact title / title + artist match) is requested; otherwise the chat gets up to three matches. |
+| `!sr 1` … `!sr 3` | Picks one of those matches (for two minutes). |
+| `!queue` | The next three requests and how many wait for approval. |
+| `!np` | The song playing now, and who requested it. |
+| `!next` | The next song. |
+| `!cancel` | Cancels your own request, as long as it isn't in the game's setlist yet. |
+
+Pick answers as a reply to the command, at most one message every 1.5 s; when chat is busy,
+answers older than 20 s are dropped. Each viewer can send one command every 3 s; more are ignored.
+
+A song that isn't in the library is **not** downloaded. It shows up under *Not in the library* on
+the dashboard, where you can search enchor.us for it and click *Download & queue* yourself. Chat
+never starts a search or a download on enchor.us.
+
+#### Dashboard and rules
+
+- **Waiting for approval**: approve or reject. With **Auto-approve**, requests skip this step.
+  **Requests open** off: chat gets "song requests are closed".
+- **Up next**: approved requests in the order they will be played. *Top* moves one to the front.
+  Pick sends them to the game's setlist one by one and keeps **N songs ahead** of the current one
+  there (default 2), so the order stays changeable and the setlist doesn't run out.
+- **Rules**: open requests per viewer (default 1; *open* = waiting, approved or in the setlist
+  but not yet played), cooldown between two requests of one viewer, maximum song length, round
+  robin (viewers who had fewer requests played go first), and a blocklist (words matched in
+  title and artist, or chart checksums). The broadcaster, and moderators if enabled, skip the
+  per-viewer limit and the cooldown. Clone Hero's song data has no explicit-lyrics flag, so there
+  is no such filter; use the blocklist.
+- Requests and rules are kept in `%LOCALAPPDATA%\Pick\twitch-requests.json` across restarts.
+
+#### Stream mode: play a setlist
+
+Requests can only be added to a **setlist**. A single song started from the song list
+(quickplay) returns to the menu afterwards, so there is nothing to add to; the dashboard then
+says so and requests wait.
+
+1. Open the song list. Approved requests are added to the setlist there as well (up to the
+   *songs kept ahead* number). If none are approved yet, add one or two songs of your own.
+2. Start the setlist. While it plays, Pick appends the next approved request whenever fewer than
+   N songs are left ahead.
+3. If the last song ends before a request is approved, the end screen says the setlist is
+   finished. Approving a request then switches it back to *continue* (see
+   [Queue songs](#queue-songs)), so keep at least one request approved or a filler song queued.
+
+"Now playing" comes from Pick's `GET /setlist` (the setlist position), so the overlay shows it
+only while a setlist plays. Pick doesn't know the song progress, and doesn't see quickplay songs.
+
 
 ### Rescan automatically after downloads
 
@@ -469,6 +545,8 @@ In every failure case Pick does nothing, and the game keeps running normally.
 | `src/companion_launcher.cpp`, `src/companion_launcher.h` | Starts the companion and fetches a pairing code over loopback (worker thread, no IL2CPP) |
 | `src/trigger_server.cpp`, `src/trigger_server.h` | Loopback HTTP listener (`/rescan`, `/status`, `/queue`, `/setlist`, `/library`) |
 | `companion/` | Companion web server (.NET 8): `Program.cs` (server, pairing, Pick calls), `Enchor.cs` (enchor.us search, downloads, rescan and queue), `Sng.cs` (Clone Hero checksum of a `.sng`), `index.html` (phone page) |
+| `companion/Twitch.cs`, `companion/Requests.cs` | Twitch login (device code flow) and chat (EventSub WebSocket, Send Chat Message API); chat commands, request rules and the feeder into the setlist |
+| `companion/twitch.html`, `companion/overlay.html` | Request dashboard (`/twitch`) and OBS overlay (`/overlay`) |
 | `src/il2cpp_api.h` | The IL2CPP runtime functions Pick calls |
 | `src/version_proxy.cpp`, `src/version.def` | `version.dll` export forwarding |
 | `tools/pick-rescan.ps1` | Example client for the trigger interface |

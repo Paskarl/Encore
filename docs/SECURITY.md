@@ -7,6 +7,10 @@ Pick has two network-facing parts:
 | `version.dll` (in the game) | `127.0.0.1:47321` (TCP, IPv4 loopback only) | Programs on this PC | None; requests from web pages are refused (see below) |
 | Companion (`PickCompanion.exe`) | All interfaces, port 47322 | Devices on the local network | Pairing token on every `/api` route |
 
+The companion also connects out to Twitch (`id.twitch.tv`, `api.twitch.tv`,
+`eventsub.wss.twitch.tv`) once the streamer has logged in for song requests, see
+[Twitch song requests](#twitch-song-requests).
+
 The companion is the only part reachable from other devices. It is not started by the game on
 its own: it runs only after the player picks **PICK** in the main menu (or starts it by hand),
 and stops when its window is closed.
@@ -50,6 +54,43 @@ Review of October 2026 (commit `31e3f5a` and the fixes after it).
   `<game folder>\PickCompanion\PickCompanion.exe` (or `PICK_COMPANION`) as the application
   name, a quoted command line with fixed arguments (`--pick-port <n> --no-browser`), and the
   companion's folder as working directory. No search path, no shell.
+
+## Twitch song requests
+
+Added after the review above (October 2026); same companion, new routes and an outbound
+connection.
+
+- **Login**: OAuth device code flow with a *public* Twitch application (no client secret
+  exists, so none can leak). Scopes `user:read:chat` and `user:write:chat` only; the granted
+  scopes are checked after login, and the token is validated at start and every hour as Twitch
+  requires. Access and refresh token are stored in `%LOCALAPPDATA%\Pick\twitch-token.json`
+  (user profile, like the pairing token), never printed, logged or sent to the browser. The
+  dashboard only sees the login name. **Log out** revokes the token at Twitch and deletes the
+  file. Refresh tokens are single use; the new one is saved before it is used.
+- **Who can control it**: every `/api/twitch/*` route needs the pairing token, like the rest of
+  `/api`. The dashboard page `/twitch` is static; opened from the PC itself (loopback address and
+  loopback Host header, as for `/pair`) it carries the pairing token so the streamer needn't
+  pair the PC's browser; elsewhere it uses a device's existing pairing.
+- **Overlay**: `/overlay` is a static page. Its data, `/overlay/state`, answers to the PC itself
+  (loopback address and Host, for OBS) or to the pairing token; it contains only what the stream
+  shows anyway: song titles, artists and the requesters' display names.
+- **Chat input is untrusted**: only messages starting with `!` are looked at, and only a fixed
+  set of commands. Control and format characters are removed, the text is limited to 200
+  characters and the search text to 100, then sent to Pick's `GET /library` URL-escaped.
+  `!sr 1`–`3` only index a list the companion built itself. One command per viewer every 3 s.
+  Viewer names and song data are shown on the dashboard and overlay with `textContent` only.
+  Chat never triggers enchor.us searches or downloads; songs missing from the library wait for
+  the streamer's click on the dashboard (enchor.us's maintainer agreed to user-initiated,
+  limited use only).
+- **Chat replies**: sent as replies to the command, start with fixed text, at most 450
+  characters, one every 1.5 s, at most 8 waiting (older than 20 s dropped), far below Twitch's
+  limits. Song titles are stripped of Clone Hero formatting tags.
+- **EventSub**: only `channel.chat.message` for the streamer's own channel. A `session_reconnect`
+  URL is followed only if it is `wss://` on a `twitch.tv` host. Shared-chat messages from partner
+  channels are ignored. Messages are limited to 1 MB.
+- **Accepted**: the Twitch token file is readable by the Windows user (same reasoning as the
+  pairing token). A paired phone can approve requests and change the rules; pairing already
+  allowed queueing songs directly.
 
 ## Fixed in this review
 

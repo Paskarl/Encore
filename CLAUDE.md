@@ -69,6 +69,18 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
   start and code request run on a worker thread (`companion_launcher.cpp`, no IL2CPP); the result
   is posted to the window procedure, which opens the dialog. Any failed check leaves the menu
   untouched (`menu …` in the log).
+- Twitch song requests live in the companion only (`Twitch.cs`, `Requests.cs`, `twitch.html`,
+  `overlay.html`); the DLL gets no Twitch code. Login is the device code flow with a public
+  client (no secret), scopes `user:read:chat user:write:chat` only; don't add scopes without
+  asking. Never print or log the Twitch tokens or send them to a page. Chat reads go through
+  EventSub WebSocket, replies through the Send Chat Message API; keep the reply throttle and the
+  per-viewer command spacing. Chat must never trigger an enchor.us search or download; missing
+  songs wait for a click on the dashboard. Requests reach the game only through `POST /queue`
+  from the feeder, which keeps `FeedAhead` songs ahead in the setlist.
+- Twitch testing: the live login and chat need the user (their Twitch account and a client ID
+  from dev.twitch.tv). The commands and the feeder can be tested from here against a fake Pick
+  (a small HTTP server answering `/status`, `/setlist`, `/library`, `/queue` on another port,
+  companion started with `--pick-port`).
 - enchor.us (unofficial API, no terms or published limits; the user should confirm with the
   maintainer on the Chorus Encore Discord) is called only from the companion, never from the DLL,
   and only on explicit user actions: one search per tap, one download per tap, no

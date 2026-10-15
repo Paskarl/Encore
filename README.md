@@ -473,3 +473,8 @@ classes with obfuscated names are found by their field types.
 
 The analysis tools take that map as input. These files are derived from the game's code. Keep
 them local and don't commit or publish them.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Clone Hero and enchor.us belong to their respective owners; Encore
+only ships its own code.

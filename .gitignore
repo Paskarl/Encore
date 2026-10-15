@@ -19,3 +19,8 @@ carve/
 # Companion build output
 companion/bin/
 companion/obj/
+
+# Release packaging (CI)
+package/
+Encore-*.zip
+Encore-*.zip.sha256

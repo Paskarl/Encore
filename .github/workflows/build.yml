@@ -1,0 +1,85 @@
+# Builds version.dll (build.bat, MSVC x64) and the companion (self-contained win-x64 single file)
+# on every push and pull request. A version tag (v1.2.3) also packages the release zip and creates
+# a draft GitHub release with it; publishing the draft stays a manual step.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build version.dll
+        shell: cmd
+        run: build.bat
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $v = $env:GITHUB_REF_NAME -replace '^v', '' }
+          else { $v = "0.0.0-dev.$($env:GITHUB_SHA.Substring(0, 7))" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Publish companion
+        shell: pwsh
+        run: >
+          dotnet publish companion -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none
+          -p:IsWebConfigTransformDisabled=true -p:Version=${{ steps.version.outputs.version }}
+          -o package/EncoreCompanion
+
+      # The zip's contents go straight into the Clone Hero folder, so the docs get Encore names.
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item build/version.dll package/
+          Copy-Item README.md package/Encore-README.md
+          Copy-Item docs/SECURITY.md package/Encore-SECURITY.md
+          if (Test-Path LICENSE) { Copy-Item LICENSE package/Encore-LICENSE.txt }
+          $zip = "Encore-${{ steps.version.outputs.version }}.zip"
+          Compress-Archive -Path package/* -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content -Encoding ascii "$zip.sha256"
+          Get-ChildItem -Recurse package | Format-Table FullName, Length
+          Get-Content "$zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Encore-${{ steps.version.outputs.version }}
+          path: |
+            Encore-*.zip
+            Encore-*.zip.sha256
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" Encore-*.zip Encore-*.zip.sha256
+          --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Encore $GITHUB_REF_NAME"
+          --notes "Unofficial mod for Clone Hero v1.1.0.6142 (Windows). Install: see Encore-README.md in the zip."

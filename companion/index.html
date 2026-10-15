@@ -25,7 +25,7 @@ h1 { font-size: 1.2rem; margin: 0; flex: 1; }
 .pill.ok { color: var(--ok); border-color: currentColor; }
 .pill.warn { color: var(--warn); border-color: currentColor; }
 .pill.bad { color: var(--bad); border-color: currentColor; }
-input[type=search] { width: 100%; margin-top: 10px; padding: 12px 14px; font-size: 1rem; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+input[type=search], #pair-code { width: 100%; margin-top: 10px; padding: 12px 14px; font-size: 1rem; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
 button { font: inherit; border: 0; border-radius: 8px; padding: 8px 14px; background: var(--accent); color: var(--accent-text); cursor: pointer; }
 button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
 button:disabled { opacity: .55; cursor: default; }
@@ -46,6 +46,8 @@ li.done { opacity: .55; }
 #toast.show { opacity: 1; transform: none; }
 .offer { padding: 10px 0 0; }
 .offer button { width: 100%; }
+#pair-form button { margin-top: 10px; }
+#pair-code { text-align: center; letter-spacing: .2em; font-size: 1.3rem; }
 .actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .actions button { white-space: nowrap; }
 .tag { font-size: .8rem; color: var(--ok); }
@@ -72,7 +74,12 @@ body.unpaired main, body.unpaired #search { display: none; }
 
 <div id="unpaired">
   <p><strong>This phone isn't paired yet.</strong></p>
-  <p>On the PC, scan the QR code in the Encore companion window, or open <code>http://localhost:47322/pair</code> there and scan it.</p>
+  <p>In Clone Hero's main menu, choose <strong>Encore</strong> and enter the code it shows:</p>
+  <form id="pair-form" class="offer">
+    <input id="pair-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456" aria-label="Pairing code">
+    <button type="submit">Pair</button>
+  </form>
+  <p>Or scan the QR code in the Encore companion window on the PC (or open <code>http://localhost:47322/pair</code> there and scan it).</p>
 </div>
 
 <main>
@@ -112,6 +119,26 @@ const $ = id => document.getElementById(id);
     history.replaceState(null, "", location.pathname);
   }
 })();
+// Pairing with the short code from the game's main menu.
+$("pair-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  let res, data = {};
+  try {
+    res = await fetch("pair/claim", { method: "POST", headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ code: $("pair-code").value }) });
+    data = await res.json();
+  } catch (e) {
+    toast("Can't reach the companion on the PC.");
+    return;
+  }
+  if (!res.ok || !/^[0-9a-f]{32}$/.test(data.token || "")) {
+    toast(data.message || "Pairing failed.");
+    return;
+  }
+  try { localStorage.setItem("encoreToken", data.token); } catch (e) {}
+  window.__token = data.token;
+  poll();
+});
 function token() {
   if (window.__token) return window.__token;
   try { return localStorage.getItem("encoreToken") || ""; } catch (e) { return ""; }

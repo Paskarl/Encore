@@ -6,6 +6,9 @@
 //   - Every /api request must carry the pairing token (Authorization: Bearer <token>). The token
 //     is random, stored in %LOCALAPPDATA%\Encore\companion-token.txt and shown on the PC only
 //     (console QR code, and the /pair page that answers to the PC itself).
+//   - Short pairing codes: Encore's "Encore" main-menu entry asks for a 6-digit code over loopback
+//     (POST /pair/code) and shows it in the game; the phone trades it for the token
+//     (POST /pair/claim). One code at a time, valid for 10 minutes, void after 5 wrong guesses.
 //   - Requests from addresses outside private networks (loopback, RFC 1918, link-local, IPv6 ULA)
 //     are refused, so a port forward does not expose the companion to the internet.
 using System.Net;
@@ -21,7 +24,7 @@ using QRCoder;
 var options = Options.Parse(args);
 if (options == null)
 {
-    Console.Error.WriteLine("usage: EncoreCompanion [--port 47322] [--encore-port 47321] [--songs-dir <folder>] [--new-token]");
+    Console.Error.WriteLine("usage: EncoreCompanion [--port 47322] [--encore-port 47321] [--songs-dir <folder>] [--new-token] [--no-browser]");
     return 2;
 }
 Console.OutputEncoding = Encoding.UTF8;
@@ -83,10 +86,35 @@ app.MapGet("/", () => Results.Content(indexHtml, "text/html; charset=utf-8"));
 // check stops a web page from reading it through DNS rebinding.
 app.MapGet("/pair", (HttpContext ctx) =>
 {
-    var ip = ctx.Connection.RemoteIpAddress;
-    if (ip == null || !IPAddress.IsLoopback(ip) || !Network.IsLoopbackHost(ctx.Request.Host.Host))
+    if (!Network.IsFromThisPc(ctx))
         return Results.StatusCode(StatusCodes.Status403Forbidden);
     return Results.Content(Pairing.PageHtml(Network.PairUrls(options.Port, token)), "text/html; charset=utf-8");
+});
+
+// A new short pairing code, for the game's main menu. Same loopback and Host checks as /pair.
+var pairCodes = new PairCodes();
+app.MapPost("/pair/code", (HttpContext ctx) =>
+{
+    if (!Network.IsFromThisPc(ctx))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    string code = pairCodes.Issue();
+    return Results.Json(new { code, expiresIn = (int)PairCodes.Lifetime.TotalSeconds, urls = Network.BaseUrls(options.Port) });
+});
+// The phone trades the code for the token.
+app.MapPost("/pair/claim", async (HttpRequest req) =>
+{
+    PairClaim? body = null;
+    try
+    {
+        body = await req.ReadFromJsonAsync<PairClaim>();
+    }
+    catch (JsonException)
+    {
+    }
+    if (!pairCodes.Claim(body?.Code))
+        return Results.Json(new { result = "bad_code", message = "Wrong or expired code. Choose Encore in the game's main menu for a new one." },
+                            statusCode: StatusCodes.Status403Forbidden);
+    return Results.Json(new { result = "paired", token });
 });
 
 var checksumPattern = new Regex("^[0-9A-Fa-f]{32}$");
@@ -226,7 +254,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"If the QR code above doesn't scan, open http://localhost:{options.Port}/pair on this PC.");
     Console.WriteLine($"Talking to Encore on http://127.0.0.1:{options.EncorePort}. Stop with Ctrl+C.");
     Console.WriteLine($"Charts from enchor.us are saved to {app.Services.GetRequiredService<DownloadManager>().DownloadDir}");
-    if (tokenIsNew)
+    if (tokenIsNew && !options.NoBrowser)
         Pairing.OpenInBrowser($"http://localhost:{options.Port}/pair");
 });
 
@@ -235,6 +263,49 @@ return 0;
 
 record QueueRequest(string? Checksum, string? Md5 = null);
 record EnchorSearchRequest(string? Q, int? Page);
+record PairClaim(string? Code);
+
+sealed class PairCodes
+{
+    public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(10);
+    const int MaxWrongGuesses = 5;
+    readonly object gate = new();
+    string? code;
+    DateTime expires;
+    int wrong;
+
+    // Replaces the previous code.
+    public string Issue()
+    {
+        lock (gate)
+        {
+            code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
+            expires = DateTime.UtcNow + Lifetime;
+            wrong = 0;
+            return code;
+        }
+    }
+
+    // True once for the current code; wrong guesses count against it.
+    public bool Claim(string? given)
+    {
+        given = new string((given ?? "").Where(char.IsAsciiDigit).ToArray());
+        lock (gate)
+        {
+            if (code == null || DateTime.UtcNow > expires)
+                return false;
+            if (given.Length != 6 ||
+                !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(given), Encoding.ASCII.GetBytes(code)))
+            {
+                if (++wrong >= MaxWrongGuesses)
+                    code = null;
+                return false;
+            }
+            code = null;
+            return true;
+        }
+    }
+}
 
 // Clone Hero's first song folder: [directories] path0 in Documents\Clone Hero\settings.ini, or
 // the default Documents\Clone Hero\Songs when that is empty.
@@ -271,6 +342,7 @@ sealed class Options
     public int Port = 47322;
     public int EncorePort = 47321;
     public bool NewToken;
+    public bool NoBrowser;
     public string? SongsDir;
 
     public static Options? Parse(string[] args)
@@ -295,6 +367,9 @@ sealed class Options
                     break;
                 case "--new-token":
                     o.NewToken = true;
+                    break;
+                case "--no-browser":
+                    o.NoBrowser = true;
                     break;
                 default:
                     return null;
@@ -403,9 +478,23 @@ static class Network
     public static bool IsLoopbackHost(string host) =>
         host is "localhost" or "127.0.0.1" or "[::1]" or "::1";
 
+    // A request from a browser or program on this PC. The Host check stops a web page from reading
+    // the answer through DNS rebinding.
+    public static bool IsFromThisPc(HttpContext ctx)
+    {
+        var ip = ctx.Connection.RemoteIpAddress;
+        return ip != null && IPAddress.IsLoopback(ip) && IsLoopbackHost(ctx.Request.Host.Host);
+    }
+
     // Pairing URLs for this PC's private IPv4 addresses; interfaces with a default gateway first.
     // The token is in the fragment, so it never appears in requests or server logs.
-    public static List<string> PairUrls(int port, string token)
+    public static List<string> PairUrls(int port, string token) =>
+        Addresses().Select(ip => $"http://{ip}:{port}/#pair={token}").ToList();
+
+    // The companion's address on each of those addresses, without the token.
+    public static List<string> BaseUrls(int port) => Addresses().Select(ip => $"http://{ip}:{port}/").ToList();
+
+    static List<string> Addresses()
     {
         var found = new List<(bool gateway, string ip)>();
         foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
@@ -419,7 +508,7 @@ static class Network
                     !a.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal))
                     found.Add((gateway, a.Address.ToString()));
         }
-        return found.OrderByDescending(f => f.gateway).Select(f => $"http://{f.ip}:{port}/#pair={token}").Distinct().ToList();
+        return found.OrderByDescending(f => f.gateway).Select(f => f.ip).Distinct().ToList();
     }
 }
 

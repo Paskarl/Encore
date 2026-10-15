@@ -58,7 +58,89 @@ structure of the scan code stays the same (see [Update resistance](#update-resis
 
 ## Install
 
-Requires Visual Studio 2022 Build Tools (MSVC x64).
+> Encore is an **unofficial** mod. It is not made, supported or endorsed by the Clone Hero team,
+> and enchor.us is a community site that Encore uses without an official API. If something goes
+> wrong in the game, remove Encore (see below) before reporting it to the Clone Hero developers.
+
+**Tested with Clone Hero v1.1.0.6142-final on Windows 10/11 (64-bit).** On other versions Encore
+checks everything it needs when the game starts and turns off any feature it can't find safely;
+the game itself keeps working either way. Nothing else needs to be installed: the companion
+includes its own .NET runtime.
+
+### 1. Download
+
+Get `Encore-<version>.zip` from the [Releases page](https://github.com/Paskarl/Encore/releases).
+Optional: compare its SHA-256 with the `.sha256` file next to it
+(`Get-FileHash Encore-<version>.zip` in PowerShell).
+
+### 2. Copy the files into the Clone Hero folder
+
+1. Close Clone Hero.
+2. Find the Clone Hero folder: the folder that contains `Clone Hero.exe`. (Right-click your Clone
+   Hero shortcut → *Open file location* if you're not sure.)
+3. Open the zip and copy **everything in it** into that folder:
+
+   ```text
+   Clone Hero\
+     Clone Hero.exe              (already there)
+     version.dll                 ← Encore
+     EncoreCompanion\
+       EncoreCompanion.exe       ← the phone companion
+     Encore-README.md, Encore-SECURITY.md, Encore-LICENSE.txt
+   ```
+
+   `version.dll` must sit right next to `Clone Hero.exe`, not in a subfolder.
+
+Some antivirus programs are suspicious of a `version.dll` in a game folder, because that is how
+the mod gets loaded. If yours removes it, you'll have to allow it there yourself; the source code
+and the build that produced the zip are public on GitHub.
+
+### 3. First start
+
+1. Start Clone Hero as usual. The main menu now has an **ENCORE** entry below PRACTICE.
+   (If it doesn't, check `encore.log` in the Clone Hero folder, see [Log](#log).)
+2. Choose **ENCORE**. Encore starts the companion in a small minimized window and shows a dialog
+   with an address like `http://192.168.1.20:47322/` and a 6-digit code.
+3. **Windows firewall:** the first time, Windows asks whether *EncoreCompanion* may use the
+   network. If the game runs in fullscreen, press **Alt+Tab** to see the prompt. Allow it for
+   **private networks** only (your home Wi-Fi), not public ones.
+
+   If you dismissed the prompt, or the phone can't load the page: make sure your Wi-Fi is set to
+   *Private* in Windows (*Settings → Network & internet → Wi-Fi → your network*), and allow
+   *EncoreCompanion* under *Windows Security → Firewall & network protection → Allow an app
+   through firewall*.
+
+### 4. Pair your phone
+
+1. Connect the phone to the **same Wi-Fi** as the PC.
+2. Open the address from the dialog in the phone's browser, enter the 6-digit code and tap
+   **Pair**. The code works once and expires after 10 minutes; choose ENCORE again for a new one.
+3. The page remembers the pairing. Add it to the home screen to open it quickly next time.
+
+Search your library, tap **Queue** to add a song to the setlist, or search enchor.us for songs
+you don't have. Details: [Companion web app](#companion-web-app). The companion keeps running
+until you close its window; the game doesn't need it for anything else.
+
+**Keep it on your home network.** Anyone who has paired can queue songs, rescan and download
+charts while the companion runs. To un-pair all phones, close the companion window, delete
+`%LOCALAPPDATA%\Encore\companion-token.txt` and choose ENCORE again. More in
+[docs/SECURITY.md](docs/SECURITY.md).
+
+### Uninstall
+
+1. Close Clone Hero and the companion window.
+2. In the Clone Hero folder, delete `version.dll`, the `EncoreCompanion` folder, the `Encore-*`
+   files and `encore.log`.
+3. Optional: delete `%LOCALAPPDATA%\Encore` (pairing token and download list), and the
+   firewall entry for *EncoreCompanion* (*Allow an app through firewall*).
+
+Charts downloaded from enchor.us stay in `Encore Downloads` inside your songs folder; keep them or
+delete that folder.
+
+### Build from source
+
+Requires Visual Studio 2022 (Build Tools are enough) with the C++ x64 tools, and the .NET 8 SDK
+for the companion.
 
 ```bat
 build.bat
@@ -66,9 +148,8 @@ copy build\version.dll "C:\Users\pasca\Documents\cloneHero\Clone Hero\"
 ```
 
 Clone Hero loads `version.dll` from its own folder, because `UnityPlayer.dll` imports
-`VERSION.dll`. Encore forwards every export to the real `System32\version.dll`.
-
-**Uninstall:** delete `version.dll` from the game folder.
+`VERSION.dll`. Encore forwards every export to the real `System32\version.dll`. Release zips are
+built by [the GitHub Actions workflow](.github/workflows/build.yml) on a version tag.
 
 ## Use
 
@@ -80,7 +161,8 @@ F5 does nothing in other menus or while a scan is already running.
 ### Trigger from other applications
 
 While the game runs, Encore listens on **`http://127.0.0.1:47321`**. It binds to loopback only,
-so only programs on the same PC can reach it.
+so only programs on the same PC can reach it. Requests from web pages (with an `Origin` header,
+or a `Host` other than `127.0.0.1`, `localhost` or `[::1]`) are refused with `403 forbidden`.
 
 | Request | Response |
 |---|---|

@@ -53,7 +53,10 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
 - The setlist is three parallel lists (song, speed, string); keep them the same length. Queue
   through `SetlistMenu.Add` when the song list is open, append to the lists otherwise.
 - The listener binds to `127.0.0.1` only. Don't widen it to other interfaces without an explicit
-  decision about authentication. LAN access goes through the companion only.
+  decision about authentication. LAN access goes through the companion only. It refuses requests
+  with an `Origin` header or a non-loopback Host (web pages: CSRF, DNS rebinding); keep that.
+- Security review, accepted risks and their reasons: `docs/SECURITY.md`. Update it when the
+  network surface changes.
 - Companion: every `/api` route needs the pairing token (`Authorization: Bearer`, constant-time
   compare); `/pair` (shows the token) answers only to loopback with a loopback Host header;
   non-private source addresses are refused. It forwards a fixed set of requests and validates

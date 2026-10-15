@@ -41,6 +41,7 @@ Encore is meant to become the bridge between Clone Hero and external tools:
 | Bridge / folder-watcher integration | **Working** as a song folder watcher that works with any downloader, see [Rescan automatically after downloads](#rescan-automatically-after-downloads) |
 | Companion web app, step 1: search your library from a phone, queue songs, rescan (`GET /library`) | **Working** (tested from a phone), see [Companion web app](#companion-web-app) |
 | Companion web app, step 2: find missing charts on enchor.us, download and queue them | **Working** (tested from a phone), see [Download missing charts](#download-missing-charts) |
+| "Encore" main-menu entry: starts the companion, shows address and pairing code in the game | **Working** (tested in the game), see [Start the companion from the main menu](#start-the-companion-from-the-main-menu) |
 | Remote song queueing (`POST /queue`, `GET /setlist`) | **Prototype working**: queues into the game's setlist from the song list and while a setlist plays, see [Queue songs](#queue-songs) |
 
 Encore does two things:
@@ -216,9 +217,31 @@ app*).
 - Anyone with the code can queue songs, start rescans and download charts that showed up in their
   enchor.us search, while the companion runs; nothing more. To revoke all paired phones, start it
   once with `--new-token` and scan the new code.
+- Short pairing codes (from the game's main menu, see below): 6 digits, issued only to a program
+  on the PC (`POST /pair/code`, loopback with a loopback `Host` header). The phone trades the code
+  for the token (`POST /pair/claim`). One code at a time; it works once, expires after 10 minutes
+  and is void after 5 wrong guesses.
 
 Options: `--port <n>` (default 47322), `--encore-port <n>` (default 47321, or `ENCORE_PORT`),
-`--songs-dir <folder>` (where downloads go, see below), `--new-token`.
+`--songs-dir <folder>` (where downloads go, see below), `--new-token`, `--no-browser` (don't open
+the pairing page when a new token is created; Encore passes it).
+
+#### Start the companion from the main menu
+
+Encore adds an **Encore** entry at the bottom of Clone Hero's main menu. Selecting it starts the
+companion if it isn't running (in its own minimized console window; close that window to stop it)
+and shows a dialog with the companion's address and a 6-digit code. On the phone, open the
+address and enter the code; the page remembers the pairing.
+
+Setup: publish the companion next to the game once (needs the .NET 8 SDK):
+
+```powershell
+dotnet publish companion -c Release -o "C:\Users\pasca\Documents\cloneHero\Clone Hero\EncoreCompanion"
+```
+
+Encore looks for `EncoreCompanion\EncoreCompanion.exe` next to `Clone Hero.exe`; the environment
+variable `ENCORE_COMPANION` (full path to the exe) overrides that. If the companion is missing,
+the dialog says where it looked. `ENCORE_MENU=0` leaves the main menu untouched.
 
 #### Download missing charts
 
@@ -306,6 +329,9 @@ Encore writes `encore.log` next to `Clone Hero.exe`:
 | `queued (mode, N matches): …` / `queue refused: …` | Result of a `/queue` request. |
 | `queue: end screen had ended the setlist; switched it back to "continue"` | A song was queued on the last song's end screen. |
 | `rescan: saved N setlist songs …` / `rescan: restored N of M setlist songs …` | The setlist was kept across a rescan. Songs whose charts were removed are not restored and listed. |
+| `menu resolve: … -> ok` / `menu: confirm hook installed …` / `menu: added "Encore" as entry 8 …` | The main-menu entry is in place. |
+| `menu resolve: … FAILED …; missing: …` / `menu: vtable check failed …` / `menu: … entry not added` | The game changed so that the menu entry can't be added safely; the menu is left as it is. Everything else works. |
+| `menu: Encore selected …` / `companion: …` / `menu: pairing dialog (…) shown` | The entry was selected: companion start, pairing code, dialog. |
 
 In every failure case Encore does nothing, and the game keeps running normally.
 
@@ -329,12 +355,20 @@ In every failure case Encore does nothing, and the game keeps running normally.
 - The song length field of `SongEntry` has an obfuscated name. `get_HasLength` is `length > 0`;
   Encore decodes its first instruction (`cmp dword [rcx+offset], 0`) and takes the `int` field at
   that offset. If the instruction looks different, `/library` reports no lengths.
+- Main-menu entry: the method that handles a confirmed main-menu entry has an obfuscated name.
+  Encore finds it as the only `MainMenu` method that calls BaseMenu's only `string X()` method
+  (the selected entry), and checks that it overrides a BaseMenu method in the same vtable slot.
+  The dialog's show method has seven obfuscator copies; the real one is the one MainMenu's code
+  calls through its vtable slot with six arguments. The visible-count fields are BaseMenu's 3rd and
+  4th `int`, checked against the game's own formula before anything changes. Any mismatch leaves
+  the menu as it is (details: `docs/ANALYSIS.md` section 8).
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `src/encore.cpp` | Startup, main-thread hook, StartScan detection, rescan, status and song queue on the main thread |
+| `src/encore.cpp` | Startup, main-thread hook, StartScan detection, rescan, status, song queue and the main-menu entry on the main thread |
+| `src/companion_launcher.cpp`, `src/companion_launcher.h` | Starts the companion and fetches a pairing code over loopback (worker thread, no IL2CPP) |
 | `src/trigger_server.cpp`, `src/trigger_server.h` | Loopback HTTP listener (`/rescan`, `/status`, `/queue`, `/setlist`, `/library`) |
 | `companion/` | Companion web server (.NET 8): `Program.cs` (server, pairing, Encore calls), `Enchor.cs` (enchor.us search, downloads, rescan and queue), `Sng.cs` (Clone Hero checksum of a `.sng`), `index.html` (phone page) |
 | `src/il2cpp_api.h` | The IL2CPP runtime functions Encore calls |

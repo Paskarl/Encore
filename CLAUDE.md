@@ -31,6 +31,10 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
   tab so the user sees the QR code. This session's sandbox sees its own copy of `%LOCALAPPDATA%`,
   so the token file read from Bash may differ from the one the real process uses; take the token
   from the companion's console output. The phone test must be done by the user.
+- Main-menu entry: Encore starts the published companion from
+  `<game folder>\EncoreCompanion\EncoreCompanion.exe` (`dotnet publish companion -c Release -o …`;
+  republish after companion changes, while it isn't running). The menu look and the dialog can
+  only be checked by the user (screenshots); the detection result is in `encore.log` (`menu …`).
 
 ## Rules
 
@@ -54,7 +58,14 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
   compare); `/pair` (shows the token) answers only to loopback with a loopback Host header;
   non-private source addresses are refused. It forwards a fixed set of requests and validates
   parameters (checksum = 32 hex digits), never arbitrary paths. Don't add firewall rules or
-  internet exposure without asking the user.
+  internet exposure without asking the user. Short pairing codes: `/pair/code` issues one only to
+  loopback with a loopback Host header; `/pair/claim` trades it for the token once (10 minutes,
+  void after 5 wrong guesses). Keep those limits.
+- Main-menu entry: the only code-path change in the game is one vtable slot (MainMenu's confirm
+  method); the wrapper must call the original for every entry but "Encore". The entry's companion
+  start and code request run on a worker thread (`companion_launcher.cpp`, no IL2CPP); the result
+  is posted to the window procedure, which opens the dialog. Any failed check leaves the menu
+  untouched (`menu …` in the log).
 - enchor.us (unofficial API, no terms or published limits; the user should confirm with the
   maintainer on the Chorus Encore Discord) is called only from the companion, never from the DLL,
   and only on explicit user actions: one search per tap, one download per tap, no

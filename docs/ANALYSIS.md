@@ -345,6 +345,125 @@ Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore
 - Online/multiplayer setlists were not tested.
 - During quickplay there is still no queue; turning a quickplay song into a setlist is not covered.
 
+## 8. Main menu entry
+
+**Goal:** an "Encore" entry in the main menu that starts the companion and shows its address and
+a pairing code in the game's own dialog. Status: working, tested in the game on 2026-10-15
+(entry drawn like the others, dialog shown, phone paired with the code, other entries unchanged).
+
+### Method
+
+Fields and signatures came from a full class dump (`ENCORE_DUMP_FILTER=*`); code from slices of
+`1c0000-1d8000` (MainMenu, BaseMenu), `399000-39b000` (ConfirmationMenu), `12e000-130000` and
+`346000-34b000` (text lookup). `find-callers.ps1` checked direct callers, `dumpbin /pdata` the
+function chunks.
+
+### BaseMenu: entries, layout, navigation
+
+`MainMenu : BaseMenu` and `ConfirmationMenu : BaseMenu`. Relevant `BaseMenu` fields (v1.1.0.6142
+offsets):
+
+| Offset | Field | Meaning |
+|---|---|---|
+| `+0x3c` | Int32 #1 (obf) | scroll offset |
+| `+0x40` | Int32 #2 (obf) | selection within the visible window |
+| `+0x44` | Int32 #3 (obf) | maximum scroll offset |
+| `+0x48` | Int32 #4 (obf) | visible entry count |
+| `+0x38` | `isActive` | menu is open (MainMenu.Update ignores input while a dialog's is set) |
+| `+0x58` | `menuStrings` | entry keys; also what the confirm method switches on |
+| `+0x60` | `tipStrings` | per-entry tip (MainMenu: empty) |
+| `+0x80` | `useUppercase` | labels drawn in upper case |
+| `+0x88` / `+0x90` | `textObjects` / `backgroundObjects` | one TMP label and one Image per visible row |
+| `+0x9e` | `allowMultiLanguage` | labels go through the text lookup |
+
+- **Count** (`0x1d6530`, virtual, called from `Start`): `visible = textObjects.Length`; if
+  `menuStrings.Length <= visible`, `visible = menuStrings.Length` and max scroll 0, otherwise max
+  scroll `= menuStrings.Length - visible` (the menu scrolls).
+- **Draw** (`0x1d5c10`): for each visible row `i`, label = `menuStrings[scroll + i]` (through the
+  text lookup, upper-cased if set), colours from `defaultColor`/`highlightColor` for the selected
+  row. Rows beyond `menuStrings.Length` get an empty label (`0x1d6410`).
+- **Navigation** (`0x1d57f0` down, `0x1d6820` up) moves `+0x40` and scrolls `+0x3c` within those
+  bounds. The selected key is `menuStrings[scroll + selection]`, read by BaseMenu's only
+  `string X()` method (`0x1d6590`, 52 callers).
+
+The main menu has 7 entries, 7 text objects and 7 backgrounds, so there is no spare row. The
+label and background of a row are separate siblings under `Main Options`.
+
+### Confirm dispatch: `MainMenu.<obf>()` @ `0x1c1a80`
+
+A virtual `void()` declared in BaseMenu (`0x1d5620`) and overridden by every menu (the same
+obfuscated name appears in VolumeMenu, SettingsMenu, PauseMenu, …). MainMenu's override:
+
+```c
+if (static flag || songScan.waitForFinish) return;   // scan overlay showing
+if (this.<bool +0x1f0>) { ...; return; }
+string s = GetSelectedString();                       // 0x1d6590
+switch (ComputeStringHash(s)) { case ...: if (s == "<literal>") ... }   // String equality 0x1981570
+...
+base.<same method>();                                 // 0x1d5620
+```
+
+An unknown string matches no case and the method does nothing. Evidence that it is reached only
+through the vtable: `find-callers.ps1` finds **0 direct callers** for `0x1c1a80`; it is the only
+MainMenu method that calls `0x1d6590` (one call site, `0x1c1c3f`); its slot is at the same
+offset in MainMenu's and BaseMenu's vtables (`+0x328`). The method is split into chained unwind
+chunks (`1c1a80-1c1c0b`, `1c1c0b-…`); the getter call sits in the second, so a body scan must
+follow `UNW_FLAG_CHAININFO` chunks.
+
+### ConfirmationMenu: the dialog
+
+`ConfirmationMenu` has seven methods `void X(string, string, string, D, D, string)` (`D` is its
+nested delegate type), obfuscator copies that differ only in which text table the title and the
+options go through and in small array-size details. Parameters: title key, option 1 key, option 2
+key (null = one button), on option 1, on option 2 (null = just close), body text (raw, set on
+`messageBodyText`).
+
+- All seven are virtual (in the vtable), so vtable presence does not identify the real one.
+- MainMenu calls the real one through `call [r10+0x5a8]`, each time preceded by
+  `mov reg, [r10+0x5b0]` (the slot's MethodInfo) and `mov [rsp+0x38], reg` (8th argument:
+  `this` + 6 parameters + MethodInfo). Counting only that load/store pair per candidate slot gives
+  0,0,0,0,0,0,6 at runtime (`+0x5a8` = `0x39a740`). Counting bare `call [reg+slot]` also matches
+  `+0x558`, which is TMP_Text's `set_text` slot called on the menu labels.
+- **`MainMenu.confirmMenu` has no body text object**: passing a body throws a
+  NullReferenceException (the game always passes null there). MainMenu has three
+  `ConfirmationMenu` fields (`confirmMenu`, `notSupportedMenu`, `leaderboardPopup`); MainMenu.Update
+  blocks menu input while any of them is open. `notSupportedMenu` has a body text.
+
+### Text lookup
+
+Labels and dialog titles go through `<obf>.Get(key, fallback)` @ `0x3499b0`: on a missing key it
+logs `<Missing i18n Resource>: key:en` to `Player.log` and returns the key itself. So "Encore",
+"Encore companion" and "OK" are shown as written.
+
+### Unity methods available in this build
+
+Stripped: `Object.Instantiate(Object, Transform)`, `Component.GetComponentInChildren(Type)`,
+`Component.GetComponents(Type)`, `CanvasRenderer.GetAlpha`. Available:
+`Object.Instantiate(Object, Transform, bool)`, `Instantiate(Object)`, `Transform.SetParent(Transform,
+bool)`, `get_parent`, `get_localPosition`/`set_localPosition`, `TMP_Text.set_text`,
+`GameObject.get_activeSelf`, `CanvasRenderer.GetColor`/`SetColor`.
+
+### Prototype and runtime results
+
+- **Hook:** the confirm slot is a plain data write in the heap-allocated `Il2CppClass` (checked
+  writable), done once when the first MainMenu instance is alive (classes initialised). The
+  wrapper handles the "Encore" key and calls the original method for everything else.
+- **Entry:** Encore clones the last row's background and then its label with
+  `Instantiate(…, parent, false)` and places them one step below (step = last row minus the one
+  before). Order matters: a clone becomes its parent's last child and is drawn on top, so cloning
+  the label first put the background over it (label dimmed, hidden when highlighted). It then
+  appends to `menuStrings`, `textObjects` and `backgroundObjects` (new arrays) and sets visible
+  count / max scroll by the count formula, after checking that the live values match that formula.
+- **Intro animation:** the menu slides its rows in when it opens. Cloning during the slide put
+  the copy on top of Quit (step 0); Encore waits until the last two rows' positions have been
+  stable for three ticks (1.5 s) and keeps the copy one step below its source afterwards (the
+  slide repeats on every return to the menu).
+- **Companion:** a worker thread starts `EncoreCompanion.exe` if nothing answers on
+  127.0.0.1:47322 and asks it for a 6-digit code (`POST /pair/code`, loopback only). The result is
+  posted to the window procedure, which opens `notSupportedMenu` with the address and code.
+- MainMenu is created again whenever the menu scene loads; a 500 ms timer adds the entry to each
+  new instance.
+
 ## After a game update
 
 1. Install the freshly built `version.dll`, start the game and read `encore.log`.
@@ -357,5 +476,9 @@ Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore
      (step 5 above is the reference).
 4. **If `resolve … FAILED`:** check in the dump whether `SongScan`/`SongSelect` or one of the
    fields was renamed.
+5. **If `menu resolve: … FAILED` or `menu: vtable check failed`:** the log names the missing piece
+   or the candidate counts. Section 8 lists what each check expects; decompile `MainMenu`,
+   `BaseMenu` and `ConfirmationMenu` again and compare. The rest of Encore works without the
+   menu entry, and `ENCORE_MENU=0` turns it off.
 
 Keep dumps, slices and decompiled output local. They are derived from the game's code.

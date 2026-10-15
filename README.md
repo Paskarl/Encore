@@ -246,8 +246,11 @@ Parameters, as query string, form body or JSON body (`{"checksum":"…"}`):
 | `409 not_in_song_list` | Another menu is open. Open the song list and try again. |
 | `503 loading` / `timeout` / `not_ready` | The next setlist song is loading, the game didn't answer within 3 s, or Pick isn't initialised. Try again. |
 
-`GET /setlist` answers `{"playing":true,"index":1,"songs":[{"title":…,"artist":…,"checksum":…,"speed":100},…]}`
-(`index` is the zero-based position of the song being played).
+`GET /setlist` answers `{"playing":true,"index":1,"songs":[{"title":…,"artist":…,"checksum":…,"speed":100},…],"scene":"playing","current":{"title":…,…}}`
+(`index` is the zero-based position of the song being played). `current` is the song on screen,
+in a setlist or as a single song (quickplay), while it is played (`scene` `"playing"`) or on its
+end screen (`"end_screen"`); in menus both are `null`. They are left out if the game's
+`GlobalVariables.currentSongEntry` field isn't found (see the log).
 
 Example client ([`tools/pick-queue.ps1`](tools/pick-queue.ps1)):
 
@@ -456,8 +459,9 @@ says so and requests wait.
    finished. Approving a request then switches it back to *continue* (see
    [Queue songs](#queue-songs)), so keep at least one request approved or a filler song queued.
 
-"Now playing" comes from Pick's `GET /setlist` (the setlist position), so the overlay shows it
-only while a setlist plays. Pick doesn't know the song progress, and doesn't see quickplay songs.
+"Now playing" (overlay, dashboard, `!np`) shows every song you play, also single songs
+(quickplay) that nobody requested; *requested by* is added when the song is a viewer's request.
+It comes from `current` in Pick's `GET /setlist`. Pick doesn't know the song progress.
 
 
 ### Rescan automatically after downloads
@@ -495,6 +499,7 @@ Pick writes `pick.log` next to `Clone Hero.exe`:
 | `F5 ignored: …` / `http ignored: …` | F5 or `/rescan` came outside the song list, or a scan was already running. |
 | `rescan started from song list (F5)` / `(http)` | F5 or `/rescan` started a scan. |
 | `queue resolve: … -> ok` / `queue ready: …` | The song library, setlist lists and `SetlistMenu.Add` were found; `/queue` works. |
+| `queue resolve: GlobalVariables.currentSongEntry …` | The current-song field wasn't found; `GET /setlist` has no `current`, so "now playing" only works in a setlist. |
 | `queue resolve: … -> FAILED` / `… not unique` | The game changed so that the setlist can't be found safely. `/queue` answers `not_ready`; rescans still work. |
 | `SetlistMenu.Add ambiguous …` | Queueing from the song list still works, but the setlist panel only shows the song after it is reopened. |
 | `library state (…)` | Sizes of the library's song lists and every setlist entry (song, speed, string). Written at startup, on `GET /setlist` when the setlist changed, and after each queued song. |

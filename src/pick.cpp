@@ -509,6 +509,7 @@ struct QueueRefs
     FieldInfo* gvPlayingSetlist = nullptr;
     FieldInfo* gvSetlistIndex = nullptr;
     FieldInfo* gvOriginalSpeed = nullptr;
+    FieldInfo* gvCurrentSong = nullptr;           // optional: the song being played, for GET /setlist
     FieldInfo* ssSetlistMenu = nullptr;           // SongSelect.setlistMenu
     const MethodInfo* setlistAdd = nullptr;       // SetlistMenu.Add, null if ambiguous
     Il2CppClass* endOfSong = nullptr;
@@ -718,6 +719,13 @@ static bool ResolveQueueRefs(const Il2CppImage* game)
         q.gvPlayingSetlist = il2cpp_class_get_field_from_name(gv, "isPlayingSetlist");
         q.gvSetlistIndex = il2cpp_class_get_field_from_name(gv, "setlistIndex");
         q.gvOriginalSpeed = il2cpp_class_get_field_from_name(gv, "originalSongSpeed");
+        // Optional; only used if it really is a SongEntry reference.
+        FieldInfo* cur = il2cpp_class_get_field_from_name(gv, "currentSongEntry");
+        if (cur && TypeName(il2cpp_field_get_type(cur)) == "SongEntry")
+            q.gvCurrentSong = cur;
+        else
+            Log("queue resolve: GlobalVariables.currentSongEntry %s, no current song in GET /setlist",
+                cur ? ("has type " + TypeName(il2cpp_field_get_type(cur))).c_str() : "not found");
     }
     q.ssSetlistMenu = il2cpp_class_get_field_from_name(g_refs.songSelect, "setlistMenu");
     if (Il2CppClass* setlistMenu = il2cpp_class_from_name(game, "", "SetlistMenu"))
@@ -1062,7 +1070,18 @@ static void HandleSetlist(JsonRequest* req)
         song.insert(song.size() - 1, ",\"speed\":" + std::to_string(i < nv ? ListItem<int>(speeds, i) : -1));
         body += (i ? "," : "") + song;
     }
-    Reply(req, 200, body + "]}");
+    body += "]";
+    // The song on screen (gameplay or its end screen), quickplay or setlist: the game sets
+    // GlobalVariables.currentSongEntry before it loads a song. In menus it still holds the last
+    // song, so it is reported only while one of the two scenes is active.
+    if (q.gvCurrentSong)
+    {
+        const char* scene = FindActiveInstance(q.gameManager) ? "playing" : FindActiveInstance(q.endOfSong) ? "end_screen" : nullptr;
+        Il2CppObject* current = scene && gv ? GetField<Il2CppObject*>(gv, q.gvCurrentSong) : nullptr;
+        body += std::string(",\"scene\":") + (scene ? std::string("\"") + scene + "\"" : "null") +
+                ",\"current\":" + (current ? SongJson(current) : "null");
+    }
+    Reply(req, 200, body + "}");
 }
 
 // Looks up a song in the list of all songs.

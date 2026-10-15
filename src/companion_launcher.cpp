@@ -27,12 +27,15 @@ struct LaunchJob
 
 static std::wstring CompanionPath()
 {
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"ENCORE_COMPANION", buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH)
-        return buf;
-    GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    std::wstring path = buf;
+    // Long enough for long-path game folders; a truncated path would point somewhere else.
+    std::wstring buf(32768, L'\0');
+    DWORD n = GetEnvironmentVariableW(L"ENCORE_COMPANION", &buf[0], static_cast<DWORD>(buf.size()));
+    if (n > 0 && n < buf.size())
+        return buf.c_str();
+    n = GetModuleFileNameW(nullptr, &buf[0], static_cast<DWORD>(buf.size()));
+    if (n == 0 || n >= buf.size())
+        return L"";
+    std::wstring path = buf.c_str();
     size_t slash = path.find_last_of(L'\\');
     path = path.substr(0, slash == std::wstring::npos ? 0 : slash + 1);
     return path + L"EncoreCompanion\\EncoreCompanion.exe";

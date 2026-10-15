@@ -35,7 +35,11 @@ byte[] tokenBytes = Encoding.UTF8.GetBytes(token);
 
 var builder = WebApplication.CreateBuilder();
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
-builder.WebHost.ConfigureKestrel(k => k.ListenAnyIP(options.Port));
+builder.WebHost.ConfigureKestrel(k =>
+{
+    k.ListenAnyIP(options.Port);
+    k.Limits.MaxRequestBodySize = 16 * 1024; // the largest valid request is a short JSON object
+});
 builder.Services.AddHttpClient("encore", c =>
 {
     c.BaseAddress = new Uri($"http://127.0.0.1:{options.EncorePort}/");
@@ -103,14 +107,7 @@ app.MapPost("/pair/code", (HttpContext ctx) =>
 // The phone trades the code for the token.
 app.MapPost("/pair/claim", async (HttpRequest req) =>
 {
-    PairClaim? body = null;
-    try
-    {
-        body = await req.ReadFromJsonAsync<PairClaim>();
-    }
-    catch (JsonException)
-    {
-    }
+    var body = await RequestJson.Read<PairClaim>(req);
     if (!pairCodes.Claim(body?.Code))
         return Results.Json(new { result = "bad_code", message = "Wrong or expired code. Choose Encore in the game's main menu for a new one." },
                             statusCode: StatusCodes.Status403Forbidden);
@@ -132,14 +129,7 @@ app.MapGet("/api/library", (IHttpClientFactory f, string? q, int? limit) =>
 });
 app.MapPost("/api/queue", async (IHttpClientFactory f, HttpRequest req) =>
 {
-    QueueRequest? body = null;
-    try
-    {
-        body = await req.ReadFromJsonAsync<QueueRequest>();
-    }
-    catch (JsonException)
-    {
-    }
+    var body = await RequestJson.Read<QueueRequest>(req);
     if (body?.Checksum == null || !checksumPattern.IsMatch(body.Checksum))
         return Results.BadRequest(new { result = "bad_request", message = "give the song's checksum" });
     return await Encore.Forward(f, HttpMethod.Post, "queue", JsonSerializer.Serialize(new { checksum = body.Checksum }));
@@ -149,14 +139,7 @@ app.MapPost("/api/queue", async (IHttpClientFactory f, HttpRequest req) =>
 
 app.MapPost("/api/enchor/search", async (HttpRequest req, EnchorClient enchor, DownloadManager downloads, IHttpClientFactory f) =>
 {
-    EnchorSearchRequest? body = null;
-    try
-    {
-        body = await req.ReadFromJsonAsync<EnchorSearchRequest>();
-    }
-    catch (JsonException)
-    {
-    }
+    var body = await RequestJson.Read<EnchorSearchRequest>(req);
     string q = (body?.Q ?? "").Trim();
     int page = body?.Page ?? 1;
     if (q.Length is < 1 or > 100 || page is < 1 or > 50)
@@ -212,14 +195,7 @@ app.MapPost("/api/enchor/search", async (HttpRequest req, EnchorClient enchor, D
 
 app.MapPost("/api/enchor/download", async (HttpRequest req, EnchorClient enchor, DownloadManager downloads) =>
 {
-    QueueRequest? body = null;
-    try
-    {
-        body = await req.ReadFromJsonAsync<QueueRequest>();
-    }
-    catch (JsonException)
-    {
-    }
+    var body = await RequestJson.Read<QueueRequest>(req);
     string md5 = body?.Md5 ?? "";
     if (!checksumPattern.IsMatch(md5))
         return Results.BadRequest(new { result = "bad_request", message = "give the chart's md5" });
@@ -260,6 +236,23 @@ app.Lifetime.ApplicationStarted.Register(() =>
 
 app.Run();
 return 0;
+
+static class RequestJson
+{
+    // The request's JSON body, or null if it is missing, too large or not JSON (a wrong content
+    // type included, which ReadFromJsonAsync reports as InvalidOperationException).
+    public static async Task<T?> Read<T>(HttpRequest req) where T : class
+    {
+        try
+        {
+            return await req.ReadFromJsonAsync<T>();
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or BadHttpRequestException)
+        {
+            return null;
+        }
+    }
+}
 
 record QueueRequest(string? Checksum, string? Md5 = null);
 record EnchorSearchRequest(string? Q, int? Page);

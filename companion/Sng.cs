@@ -34,13 +34,23 @@ static class Sng
         byte[] mask = r.ReadBytes(16);
 
         long metaEnd = fs.Position + 8 + checked((long)r.ReadUInt64());
+        if (metaEnd > fs.Length)
+            throw new InvalidDataException("metadata section lies outside the .sng");
         var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         ulong pairs = r.ReadUInt64();
+        // Lengths are checked against the metadata section first: ReadBytes allocates the full
+        // count up front, so a corrupt length could otherwise ask for gigabytes.
+        string ReadString()
+        {
+            int len = r.ReadInt32();
+            if (len < 0 || len > metaEnd - fs.Position)
+                throw new InvalidDataException("bad metadata length");
+            return Encoding.UTF8.GetString(r.ReadBytes(len));
+        }
         for (ulong i = 0; i < pairs && fs.Position < metaEnd; ++i)
         {
-            string key = Encoding.UTF8.GetString(r.ReadBytes(r.ReadInt32()));
-            string value = Encoding.UTF8.GetString(r.ReadBytes(r.ReadInt32()));
-            metadata[key] = value;
+            string key = ReadString();
+            metadata[key] = ReadString();
         }
         fs.Position = metaEnd;
 

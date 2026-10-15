@@ -199,6 +199,12 @@ sealed class DownloadManager(EnchorClient enchor, IHttpClientFactory pick, strin
     // Clone Hero checksum of a chart this companion downloaded before, if its file is still there.
     public string? KnownChecksum(string md5) => _record.Get(md5) is { } e && File.Exists(e.File) ? e.Checksum : null;
 
+    public DownloadJob? Job(string id)
+    {
+        lock (_gate)
+            return _jobs.FirstOrDefault(j => j.Id == id);
+    }
+
     public List<object> Snapshot()
     {
         lock (_gate)

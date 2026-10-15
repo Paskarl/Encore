@@ -49,6 +49,11 @@ string songsDir = options.SongsDir ?? SongsFolder.Find();
 builder.Services.AddSingleton(new EnchorClient(new HttpClient { Timeout = TimeSpan.FromMinutes(10) }));
 builder.Services.AddSingleton(sp => new DownloadManager(sp.GetRequiredService<EnchorClient>(),
                                                         sp.GetRequiredService<IHttpClientFactory>(), songsDir));
+var twitchHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+twitchHttp.DefaultRequestHeaders.UserAgent.ParseAdd(EnchorClient.UserAgent);
+builder.Services.AddSingleton(new TwitchAuth(twitchHttp));
+builder.Services.AddSingleton(sp => new TwitchChat(sp.GetRequiredService<TwitchAuth>(), twitchHttp));
+builder.Services.AddSingleton(sp => new StreamRequests(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<DownloadManager>()));
 var app = builder.Build();
 
 app.Use(async (ctx, next) =>
@@ -67,9 +72,7 @@ app.Use(async (ctx, next) =>
         "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
     if (ctx.Request.Path.StartsWithSegments("/api"))
     {
-        string auth = ctx.Request.Headers.Authorization.ToString();
-        byte[] given = Encoding.UTF8.GetBytes(auth.StartsWith("Bearer ", StringComparison.Ordinal) ? auth[7..] : "");
-        if (!CryptographicOperations.FixedTimeEquals(given, tokenBytes))
+        if (!HasPairingToken(ctx))
         {
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
             await ctx.Response.WriteAsJsonAsync(new { result = "unpaired", message = "pair this device: scan the QR code shown on the PC" });
@@ -79,10 +82,20 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-string indexHtml;
-using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("index.html")!)
-using (var r = new StreamReader(s))
-    indexHtml = r.ReadToEnd();
+bool HasPairingToken(HttpContext ctx)
+{
+    string auth = ctx.Request.Headers.Authorization.ToString();
+    byte[] given = Encoding.UTF8.GetBytes(auth.StartsWith("Bearer ", StringComparison.Ordinal) ? auth[7..] : "");
+    return CryptographicOperations.FixedTimeEquals(given, tokenBytes);
+}
+
+static string Resource(string name)
+{
+    using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name)!;
+    using var r = new StreamReader(s);
+    return r.ReadToEnd();
+}
+string indexHtml = Resource("index.html"), twitchHtml = Resource("twitch.html"), overlayHtml = Resource("overlay.html");
 
 app.MapGet("/", () => Results.Content(indexHtml, "text/html; charset=utf-8"));
 
@@ -211,6 +224,105 @@ app.MapPost("/api/enchor/download", async (HttpRequest req, EnchorClient enchor,
 
 app.MapGet("/api/downloads", (DownloadManager downloads) => Results.Json(new { jobs = downloads.Snapshot() }));
 
+// --- Twitch song requests: Twitch.cs (login, chat), Requests.cs (commands, moderation, feeder) ---
+
+// The moderation dashboard. On the PC itself it comes with the pairing token (like /pair, which
+// shows it too); elsewhere it uses the token of a device paired through the phone page.
+app.MapGet("/twitch", (HttpContext ctx) =>
+    Results.Content(twitchHtml.Replace("%%TOKEN%%", Network.IsFromThisPc(ctx) ? token : ""), "text/html; charset=utf-8"));
+
+app.MapGet("/api/twitch", (TwitchAuth auth, TwitchChat chat, StreamRequests requests) => Results.Json(new
+{
+    twitch = new
+    {
+        state = auth.State, message = auth.Message, login = auth.Login, userCode = auth.UserCode,
+        verificationUri = auth.VerificationUri,
+        codeExpiresIn = auth.CodeExpiresUtc is { } x ? Math.Max(0, (int)(x - DateTime.UtcNow).TotalSeconds) : (int?)null,
+        chat = chat.State, chatMessage = chat.Message,
+        clientId = requests.Settings.ClientId ?? (TwitchAuth.DefaultClientId.Length > 0 ? TwitchAuth.DefaultClientId : null),
+        builtInClientId = TwitchAuth.DefaultClientId.Length > 0,
+    },
+    requests = requests.Snapshot(),
+}));
+
+var clientIdPattern = new Regex("^[a-z0-9]{1,64}$");
+app.MapPost("/api/twitch/login", async (HttpRequest req, TwitchAuth auth, StreamRequests requests) =>
+{
+    var body = await RequestJson.Read<TwitchLoginRequest>(req);
+    string clientId = (body?.ClientId ?? "").Trim();
+    if (clientId.Length == 0)
+        clientId = requests.Settings.ClientId ?? TwitchAuth.DefaultClientId;
+    if (!clientIdPattern.IsMatch(clientId))
+        return Results.BadRequest(new { result = "bad_request", message = "Enter the client ID of your Twitch application." });
+    string? problem = await auth.StartLogin(clientId);
+    if (problem != null)
+        return Results.Json(new { result = "twitch_error", message = problem }, statusCode: StatusCodes.Status502BadGateway);
+    if (clientId != TwitchAuth.DefaultClientId)
+    {
+        var s = requests.Settings;
+        s.ClientId = clientId;
+        requests.UpdateSettings(s);
+    }
+    return Results.Json(new { result = "started", userCode = auth.UserCode, verificationUri = auth.VerificationUri });
+});
+app.MapPost("/api/twitch/login/cancel", (TwitchAuth auth) =>
+{
+    auth.CancelLogin();
+    return Results.Json(new { result = "ok" });
+});
+app.MapPost("/api/twitch/logout", async (TwitchAuth auth) =>
+{
+    await auth.Logout();
+    return Results.Json(new { result = "ok" });
+});
+app.MapPost("/api/twitch/settings", async (HttpRequest req, StreamRequests requests) =>
+{
+    var body = await RequestJson.Read<RequestSettings>(req);
+    if (body == null)
+        return Results.BadRequest(new { result = "bad_request", message = "invalid settings" });
+    body.ClientId = requests.Settings.ClientId; // changed only through a login
+    requests.UpdateSettings(body);
+    return Results.Json(new { result = "ok", settings = requests.Settings });
+});
+app.MapPost("/api/twitch/request", async (HttpRequest req, StreamRequests requests) =>
+{
+    var body = await RequestJson.Read<RequestAction>(req);
+    if (body == null || body.Action is not ("approve" or "reject" or "remove" or "top" or "download" or "played"))
+        return Results.BadRequest(new { result = "bad_request", message = "unknown action" });
+    string? problem = requests.Act(body.Id, body.Action, body.JobId);
+    return problem == null
+        ? Results.Json(new { result = "ok" })
+        : Results.Json(new { result = "refused", message = problem }, statusCode: StatusCodes.Status409Conflict);
+});
+
+// OBS browser source. Its data answers to a browser on this PC without the token (OBS can't send
+// one), or to the pairing token in the page's #token= fragment for OBS on another PC.
+app.MapGet("/overlay", () => Results.Content(overlayHtml, "text/html; charset=utf-8"));
+app.MapGet("/overlay/state", (HttpContext ctx, StreamRequests requests) =>
+    Network.IsFromThisPc(ctx) || HasPairingToken(ctx)
+        ? Results.Json(requests.OverlaySnapshot())
+        : Results.StatusCode(StatusCodes.Status401Unauthorized));
+
+{
+    var auth = app.Services.GetRequiredService<TwitchAuth>();
+    var chat = app.Services.GetRequiredService<TwitchChat>();
+    var requests = app.Services.GetRequiredService<StreamRequests>();
+    var stopping = app.Lifetime.ApplicationStopping;
+    auth.Changed += chat.Restart;
+    chat.Received += async m =>
+    {
+        string? reply = await requests.OnChat(m);
+        if (reply != null)
+            chat.Reply(reply, m.MessageId);
+    };
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        _ = Task.Run(() => chat.Run(stopping));
+        _ = Task.Run(() => requests.FeedLoop(stopping));
+        _ = Task.Run(() => auth.ValidateLoop(stopping));
+    });
+}
+
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var urls = Network.PairUrls(options.Port, token);
@@ -257,6 +369,8 @@ static class RequestJson
 record QueueRequest(string? Checksum, string? Md5 = null);
 record EnchorSearchRequest(string? Q, int? Page);
 record PairClaim(string? Code);
+record TwitchLoginRequest(string? ClientId);
+record RequestAction(int Id, string? Action, string? JobId);
 
 sealed class PairCodes
 {
@@ -404,7 +518,7 @@ static class Pick
         return Results.Content(body, "application/json; charset=utf-8", Encoding.UTF8, status);
     }
 
-    public record LibrarySong(string Title, string Artist, string Album, string Checksum);
+    public record LibrarySong(string Title, string Artist, string Album, string Checksum, int? Length = null);
 
     // Library songs matching a search text (GET /library); null if Pick is not reachable or not ready.
     public static async Task<List<LibrarySong>?> Search(IHttpClientFactory factory, string q, int limit = 200)
@@ -415,7 +529,8 @@ static class Pick
         using var doc = JsonDocument.Parse(body);
         return doc.RootElement.GetProperty("songs").EnumerateArray().Select(s => new LibrarySong(
             s.GetProperty("title").GetString() ?? "", s.GetProperty("artist").GetString() ?? "",
-            s.GetProperty("album").GetString() ?? "", s.GetProperty("checksum").GetString() ?? "")).ToList();
+            s.GetProperty("album").GetString() ?? "", s.GetProperty("checksum").GetString() ?? "",
+            s.TryGetProperty("length", out var len) && len.ValueKind == JsonValueKind.Number ? len.GetInt32() : null)).ToList();
     }
 
     // Finds a library song by its checksum. /library searches text only, so look it up by title

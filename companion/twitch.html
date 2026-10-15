@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#14161a">
+<title>Pick requests</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --text: #16181d; --muted: #646a75; --line: #e1e4e9;
+  --accent: #3f5bd9; --accent-text: #ffffff; --ok: #1d8a4e; --warn: #b5590f; --bad: #c0322b; --now: #eef1ff; --twitch: #8a5cf5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a; --panel: #1d2026; --text: #eceef2; --muted: #9aa0ab; --line: #2c3038;
+    --accent: #7d93ff; --accent-text: #0f1220; --ok: #4cc98a; --warn: #f0a25a; --bad: #ff7b72; --now: #262c44; --twitch: #a98bff;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 1.15rem; margin: 0; flex: 1; }
+.pill { font-size: .8rem; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.ok { color: var(--ok); border-color: currentColor; }
+.pill.warn { color: var(--warn); border-color: currentColor; }
+.pill.bad { color: var(--bad); border-color: currentColor; }
+main { padding: 8px 16px 40px; max-width: 1100px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 24px; }
+@media (max-width: 820px) { main { grid-template-columns: minmax(0, 1fr); } }
+h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 6px; display: flex; gap: 8px; align-items: center; }
+h2 .count { background: var(--accent); color: var(--accent-text); border-radius: 999px; padding: 0 7px; font-size: .75rem; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+ul { list-style: none; margin: 0; padding: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+li { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+li:first-child { border-top: 0; }
+li.now { background: var(--now); }
+.song { flex: 1; min-width: 12em; }
+.title { font-weight: 600; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.who { color: var(--twitch); font-weight: 600; }
+.num { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 1.6em; text-align: right; }
+.empty { color: var(--muted); padding: 12px; }
+.btns { display: flex; gap: 6px; flex-wrap: wrap; }
+button { font: inherit; font-size: .9rem; border: 0; border-radius: 8px; padding: 6px 12px; background: var(--accent); color: var(--accent-text); cursor: pointer; }
+button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+button.danger { background: transparent; color: var(--bad); border: 1px solid var(--line); }
+button.twitch { background: var(--twitch); color: #fff; }
+button:disabled { opacity: .55; cursor: default; }
+input[type=text], input[type=number], textarea { font: inherit; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+input[type=number] { width: 6em; }
+textarea { width: 100%; min-height: 5em; resize: vertical; }
+label.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+label.row span { flex: 1; }
+.code { font: 700 2rem/1.2 ui-monospace, Consolas, monospace; letter-spacing: .15em; margin: 6px 0; }
+.banner { margin-top: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--warn); color: var(--warn); }
+.hint { color: var(--muted); font-size: .85rem; margin: 6px 0 0; }
+.toggles { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; }
+.toggles label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+.results { width: 100%; margin-top: 6px; }
+.results li { background: var(--bg); }
+code { color: var(--accent); overflow-wrap: anywhere; }
+a { color: var(--accent); }
+[hidden] { display: none !important; }
+#toast { position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 560px; margin: 0 auto; padding: 12px 14px; border-radius: 10px; background: var(--text); color: var(--bg); opacity: 0; transition: opacity .2s; pointer-events: none; }
+#toast.show { opacity: 1; }
+#unpaired { padding: 32px 16px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>Pick · Twitch requests</h1>
+    <span id="game" class="pill">…</span>
+    <span id="conn" class="pill">…</span>
+  </div>
+</header>
+
+<div id="unpaired" hidden>
+  <p><strong>This browser isn't paired with the companion.</strong></p>
+  <p>Open this page on the PC that runs the companion (<code>http://localhost:47322/twitch</code>),
+     or pair this device on the <a href="./">main page</a> first.</p>
+</div>
+
+<main id="main" hidden>
+  <section>
+    <h2>Twitch</h2>
+    <div class="card" id="twitch-card">
+      <div id="tw-out" hidden>
+        <p style="margin-top:0">Log in with the Twitch account you stream on. Pick reads chat for
+          <code>!sr</code> commands and answers there; it asks Twitch for nothing else.</p>
+        <div id="tw-client" class="btns" style="align-items:center">
+          <input id="client-id" type="text" placeholder="Client ID of your Twitch application" autocomplete="off" spellcheck="false" style="flex:1;min-width:16em">
+        </div>
+        <p class="hint" id="client-hint">Register an application once at dev.twitch.tv/console (client type <strong>Public</strong>), see the README.</p>
+        <p><button id="login" class="twitch" type="button">Log in with Twitch</button></p>
+      </div>
+      <div id="tw-wait" hidden>
+        <p style="margin-top:0">Open <a id="verify-link" target="_blank" rel="noopener noreferrer"></a> and enter this code:</p>
+        <div class="code" id="user-code"></div>
+        <p class="hint" id="code-expiry"></p>
+        <button id="cancel-login" class="secondary" type="button">Cancel</button>
+      </div>
+      <div id="tw-in" hidden>
+        <div class="btns" style="align-items:center">
+          <span style="flex:1">Logged in as <strong id="login-name"></strong> · <span id="chat-state"></span></span>
+          <button id="logout" class="secondary" type="button">Log out</button>
+        </div>
+      </div>
+      <p class="hint" id="tw-message" hidden></p>
+      <div class="toggles">
+        <label><input id="open" type="checkbox"> Requests open</label>
+        <label><input id="auto" type="checkbox"> Auto-approve</label>
+      </div>
+    </div>
+    <div id="feed-problem" class="banner" hidden></div>
+
+    <h2>Now playing</h2>
+    <ul id="now"></ul>
+
+    <h2>Waiting for approval <span class="count" id="pending-count" hidden></span></h2>
+    <ul id="pending"></ul>
+
+    <h2>Up next</h2>
+    <ul id="upcoming"></ul>
+
+    <h2>Not in the library</h2>
+    <ul id="missing"></ul>
+    <p class="hint">Chat never downloads anything. Search enchor.us for a request yourself and download it if you want to play it; it is queued when Clone Hero has loaded it.</p>
+  </section>
+
+  <section>
+    <h2>Rules</h2>
+    <form class="card" id="settings">
+      <label class="row"><span>Open requests per viewer</span><input id="s-maxopen" type="number" min="1" max="10"></label>
+      <label class="row"><span>Cooldown between requests (seconds)</span><input id="s-cooldown" type="number" min="0" max="3600"></label>
+      <label class="row"><span>Maximum song length (minutes, 0 = any)</span><input id="s-maxlen" type="number" min="0" max="60" step="0.5"></label>
+      <label class="row"><span>Songs kept ahead in the game's setlist</span><input id="s-ahead" type="number" min="1" max="5"></label>
+      <label class="row"><span>Round robin (viewers with fewer played requests first)</span><input id="s-rr" type="checkbox"></label>
+      <label class="row"><span>Moderators skip limit and cooldown</span><input id="s-mods" type="checkbox"></label>
+      <label style="display:block;padding-top:6px">Blocklist: one entry per line, a word or name matched in title and artist, or a song checksum
+        <textarea id="s-block" spellcheck="false"></textarea></label>
+      <p class="hint">No explicit-lyrics filter: Clone Hero's song data has no such flag. Use the blocklist.</p>
+      <p><button type="submit">Save rules</button></p>
+    </form>
+
+    <h2>OBS overlay</h2>
+    <div class="card">
+      <p style="margin-top:0">Add a <strong>Browser</strong> source in OBS (on this PC) with the URL</p>
+      <p><code id="overlay-url"></code></p>
+      <p class="hint">Width 600, height 400 work well. Options: <code>?queue=0</code> hides the list,
+        <code>?max=3</code> limits it.</p>
+    </div>
+
+    <h2>History</h2>
+    <ul id="history"></ul>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+window.__token = "%%TOKEN%%";
+function token() {
+  if (window.__token) return window.__token;
+  try { return localStorage.getItem("pickToken") || ""; } catch (e) { return ""; }
+}
+const $ = id => document.getElementById(id);
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+}
+let toastTimer;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
+}
+async function api(method, path, body) {
+  const opts = { method, headers: { "Authorization": "Bearer " + token() } };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch("api/" + path, opts);
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (res.status === 401) { $("unpaired").hidden = false; $("main").hidden = true; throw data; }
+  if (!res.ok) throw Object.assign({ status: res.status }, data);
+  return data;
+}
+function fmtLen(s) { return s ? Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0") : ""; }
+function ago(s) { return s < 60 ? s + " s ago" : s < 3600 ? Math.floor(s / 60) + " min ago" : Math.floor(s / 3600) + " h ago"; }
+function button(text, cls, onClick) {
+  const b = el("button", cls, text);
+  b.type = "button";
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    try { await onClick(b); } catch (e) { toast(e.message || "That didn't work."); }
+    b.disabled = false;
+  });
+  return b;
+}
+async function act(id, action, extra) {
+  await api("POST", "twitch/request", Object.assign({ id, action }, extra || {}));
+  await refresh();
+}
+function songItem(r, num) {
+  const li = el("li");
+  if (num !== undefined) li.append(el("span", "num", num));
+  const song = el("div", "song");
+  song.append(el("div", "title", r.title || r.query));
+  const meta = el("div", "meta");
+  if (r.artist) meta.append(r.artist + " · ");
+  if (r.length) meta.append(fmtLen(r.length) + " · ");
+  if (r.user) { meta.append("requested by "); meta.append(el("span", "who", r.user)); }
+  if (r.ageSeconds !== undefined) meta.append(" · " + ago(r.ageSeconds));
+  if (r.query && r.title && r.query !== r.title && r.state !== "missing") meta.append(" · “" + r.query + "”");
+  song.append(meta);
+  if (r.note) song.append(el("div", "meta", r.note));
+  li.append(song);
+  return li;
+}
+function fill(ul, items, emptyText) {
+  ul.replaceChildren();
+  if (!items.length) { ul.append(el("li", "empty", emptyText)); return; }
+  items.forEach(i => ul.append(i));
+}
+
+// --- enchor.us search for a missing request (explicit click only) ---
+const openSearches = new Map(); // request id -> results element, kept across refreshes
+async function searchEnchor(r, li) {
+  const box = el("ul", "results");
+  box.append(el("li", "empty", "Searching enchor.us…"));
+  openSearches.set(r.id, box);
+  li.append(box);
+  let data;
+  try { data = await api("POST", "enchor/search", { q: r.query, page: 1 }); }
+  catch (e) { box.replaceChildren(el("li", "empty", e.message || "enchor.us search failed.")); return; }
+  box.replaceChildren();
+  if (!data.charts.length) { box.append(el("li", "empty", "Nothing found on enchor.us.")); return; }
+  for (const c of data.charts) {
+    const item = songItem({ title: c.title, artist: c.artist + (c.charter ? " · charted by " + c.charter : ""), length: c.length });
+    const btns = el("div", "btns");
+    if (c.inLibrary) {
+      item.querySelector(".song").append(el("div", "meta", c.inLibrary.exact ? "In your library" : "You have this song (maybe another chart). Ask the viewer to request it with its exact title."));
+    } else {
+      btns.append(button("Download & queue", "", async () => {
+        const job = await api("POST", "enchor/download", { md5: c.md5 });
+        await act(r.id, "download", { jobId: job.id });
+        openSearches.delete(r.id);
+        toast("Downloading. It is queued when Clone Hero has loaded it.");
+      }));
+    }
+    item.append(btns);
+    box.append(item);
+  }
+}
+
+let current = null;
+function render(d) {
+  current = d;
+  const tw = d.twitch, rq = d.requests;
+  // Connection
+  $("tw-out").hidden = tw.state !== "disconnected";
+  $("tw-wait").hidden = tw.state !== "awaiting_user";
+  $("tw-in").hidden = tw.state !== "connected";
+  $("tw-client").hidden = tw.builtInClientId;
+  $("client-hint").hidden = tw.builtInClientId;
+  if (tw.clientId && !$("client-id").value && document.activeElement !== $("client-id")) $("client-id").value = tw.clientId;
+  $("tw-message").hidden = !(tw.message || tw.chatMessage);
+  $("tw-message").textContent = tw.message || tw.chatMessage || "";
+  if (tw.state === "awaiting_user") {
+    $("user-code").textContent = tw.userCode || "";
+    const uri = tw.verificationUri || "";
+    const link = $("verify-link");
+    link.textContent = uri.replace(/^https:\/\//, "");
+    if (/^https:\/\/([a-z0-9-]+\.)*twitch\.tv\//.test(uri)) link.href = uri; else link.removeAttribute("href");
+    $("code-expiry").textContent = tw.codeExpiresIn ? "The code is valid for " + Math.ceil(tw.codeExpiresIn / 60) + " more minutes." : "";
+  }
+  $("login-name").textContent = tw.login || "";
+  $("chat-state").textContent = { listening: "reading chat", connecting: "connecting to chat…", offline: "chat offline" }[tw.chat] || tw.chat;
+  const conn = $("conn");
+  conn.className = "pill " + (tw.state === "connected" ? (tw.chat === "listening" ? "ok" : "warn") : "");
+  conn.textContent = tw.state === "connected" ? (tw.chat === "listening" ? "Twitch: " + tw.login : "Twitch: connecting") : "Twitch: logged out";
+
+  const s = rq.settings;
+  if (document.activeElement !== $("open")) $("open").checked = s.open;
+  if (document.activeElement !== $("auto")) $("auto").checked = s.autoApprove;
+  if (!settingsLoaded) loadSettings(s);
+
+  const game = $("game");
+  if (!rq.setlist) { game.className = "pill bad"; game.textContent = "Clone Hero: offline"; }
+  else if (rq.setlist.playing) { game.className = "pill ok"; game.textContent = "Setlist " + (rq.setlist.index + 1) + "/" + rq.setlist.songs.length; }
+  else { game.className = "pill warn"; game.textContent = "No setlist playing"; }
+  $("feed-problem").hidden = !rq.feedProblem;
+  $("feed-problem").textContent = rq.feedProblem || "";
+
+  // Now playing
+  const now = [];
+  if (rq.setlist && rq.setlist.playing && rq.setlist.songs[rq.setlist.index]) {
+    const song = rq.setlist.songs[rq.setlist.index];
+    const li = songItem({ title: song.title, artist: song.artist, user: rq.playing ? rq.playing.user : null });
+    li.classList.add("now");
+    if (rq.playing) li.append(el("div", "btns"));
+    now.push(li);
+  }
+  fill($("now"), now, "No setlist is playing. Requests are added to the setlist; see the README for stream mode.");
+
+  // Pending
+  $("pending-count").hidden = !rq.pending.length;
+  $("pending-count").textContent = rq.pending.length;
+  fill($("pending"), rq.pending.map(r => {
+    const li = songItem(r);
+    const b = el("div", "btns");
+    b.append(button("Approve", "", () => act(r.id, "approve")), button("Reject", "danger", () => act(r.id, "reject")));
+    li.append(b);
+    return li;
+  }), "No requests waiting.");
+
+  // Upcoming
+  fill($("upcoming"), rq.upcoming.map((r, i) => {
+    const li = songItem(r, i + 1);
+    const b = el("div", "btns");
+    if (r.state === "queued") {
+      li.querySelector(".song").append(el("div", "meta", "In the game's setlist at #" + r.position));
+      b.append(button("Mark played", "secondary", () => act(r.id, "played")));
+    } else {
+      if (r.pinned) li.querySelector(".song").append(el("div", "meta", "Moved to the top"));
+      else if (i > 0) b.append(button("Top", "secondary", () => act(r.id, "top")));
+      b.append(button("Reject", "danger", () => act(r.id, "reject")));
+    }
+    li.append(b);
+    return li;
+  }), "Nothing approved yet.");
+
+  // Missing
+  fill($("missing"), rq.missing.map(r => {
+    const li = songItem({ title: "“" + r.query + "”", user: r.user, ageSeconds: r.ageSeconds, note: r.state === "downloading" ? "Downloading from enchor.us…" : r.note });
+    const b = el("div", "btns");
+    if (r.state === "missing") b.append(button("Search enchor.us", "secondary", async () => { openSearches.get(r.id)?.remove(); await searchEnchor(r, li); }));
+    b.append(button("Reject", "danger", () => act(r.id, "reject")));
+    li.append(b);
+    const kept = openSearches.get(r.id);
+    if (kept && r.state === "missing") li.append(kept);
+    return li;
+  }), "Every request so far was in the library.");
+
+  // History
+  fill($("history"), rq.history.map(r => {
+    const li = songItem(Object.assign({}, r, { title: r.title || r.query, ageSeconds: undefined }));
+    li.querySelector(".song").append(el("div", "meta", r.state));
+    const b = el("div", "btns");
+    if (r.checksum && r.state !== "played") b.append(button("Approve", "secondary", () => act(r.id, "approve")));
+    b.append(button("Remove", "secondary", () => act(r.id, "remove")));
+    li.append(b);
+    return li;
+  }), "No finished requests yet.");
+}
+
+let settingsLoaded = false;
+function loadSettings(s) {
+  settingsLoaded = true;
+  $("s-maxopen").value = s.maxOpenPerViewer;
+  $("s-cooldown").value = s.cooldownSeconds;
+  $("s-maxlen").value = s.maxLengthSeconds / 60;
+  $("s-ahead").value = s.feedAhead;
+  $("s-rr").checked = s.roundRobin;
+  $("s-mods").checked = s.modsBypassLimits;
+  $("s-block").value = (s.blocklist || []).join("\n");
+}
+function formSettings() {
+  return {
+    open: $("open").checked, autoApprove: $("auto").checked,
+    maxOpenPerViewer: +$("s-maxopen").value || 1, cooldownSeconds: +$("s-cooldown").value || 0,
+    maxLengthSeconds: Math.round((+$("s-maxlen").value || 0) * 60), feedAhead: +$("s-ahead").value || 2,
+    roundRobin: $("s-rr").checked, modsBypassLimits: $("s-mods").checked,
+    blocklist: $("s-block").value.split("\n").map(x => x.trim()).filter(Boolean),
+  };
+}
+async function saveSettings(msg) {
+  try { const r = await api("POST", "twitch/settings", formSettings()); loadSettings(r.settings); if (msg) toast(msg); }
+  catch (e) { toast(e.message || "Saving failed."); }
+}
+$("settings").addEventListener("submit", e => { e.preventDefault(); saveSettings("Rules saved."); });
+$("open").addEventListener("change", () => saveSettings($("open").checked ? "Requests are open." : "Requests are closed."));
+$("auto").addEventListener("change", () => saveSettings($("auto").checked ? "Auto-approve on." : "Auto-approve off."));
+
+$("login").addEventListener("click", async () => {
+  try { await api("POST", "twitch/login", { clientId: $("client-id").value.trim() }); await refresh(); }
+  catch (e) { toast(e.message || "Login failed."); }
+});
+$("cancel-login").addEventListener("click", async () => { await api("POST", "twitch/login/cancel"); await refresh(); });
+$("logout").addEventListener("click", async () => {
+  if (!confirm("Log out of Twitch? Pick stops reading chat.")) return;
+  await api("POST", "twitch/logout"); await refresh();
+});
+$("overlay-url").textContent = "http://localhost:" + (location.port || "80") + "/overlay";
+
+async function refresh() {
+  try {
+    const d = await api("GET", "twitch");
+    $("unpaired").hidden = true;
+    $("main").hidden = false;
+    render(d);
+  } catch (e) {
+    if (e && e.result !== "unpaired") $("conn").textContent = "Companion offline";
+  }
+}
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+</script>
+</body>
+</html>

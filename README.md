@@ -47,7 +47,7 @@ Pick is meant to become the bridge between Clone Hero and external tools:
 | Companion web app, step 2: find missing charts on enchor.us, download and queue them | **Working** (tested from a phone), see [Download missing charts](#download-missing-charts) |
 | "Pick" main-menu entry: starts the companion, shows address and pairing code in the game | **Working** (tested in the game), see [Start the companion from the main menu](#start-the-companion-from-the-main-menu) |
 | Remote song queueing (`POST /queue`, `GET /setlist`) | **Prototype working**: queues into the game's setlist from the song list and while a setlist plays, see [Queue songs](#queue-songs) |
-| Twitch song requests: `!sr` in chat, moderation dashboard, OBS overlay | **MVP**, tested against a simulated game; live Twitch test pending, see [Twitch song requests](#twitch-song-requests) |
+| Twitch song requests: `!sr` in chat, moderation dashboard, OBS overlay | **MVP working** (tested live: `!sr` from chat, approval into the setlist, now playing in OBS for setlists and quickplay), see [Twitch song requests](#twitch-song-requests) |
 | Twitch voting, polls, channel points, predictions | Planned |
 
 Pick does two things:

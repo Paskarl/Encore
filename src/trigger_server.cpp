@@ -52,6 +52,7 @@ static const char* Reason(int code)
     case 200: return "OK";
     case 202: return "Accepted";
     case 400: return "Bad Request";
+    case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 409: return "Conflict";
@@ -337,16 +338,44 @@ static void HandleLibrary(SOCKET s, const std::string& query)
     HandleJsonCommand(s, kCmdLibrary, req, "GET /library");
 }
 
-static size_t ContentLength(const std::string& head)
+// The value of a header (name in lower case, with the colon), trimmed; false if it is missing.
+static bool HeaderValue(const std::string& head, const char* name, std::string& value)
 {
     // Header names are case-insensitive.
     std::string lower = head;
     for (char& c : lower)
         c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    size_t pos = lower.find("\r\ncontent-length:");
+    size_t pos = lower.find(std::string("\r\n") + name);
     if (pos == std::string::npos)
-        return 0;
-    return strtoul(lower.c_str() + pos + 17, nullptr, 10);
+        return false;
+    pos += 2 + strlen(name);
+    size_t end = lower.find("\r\n", pos);
+    value = lower.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    size_t first = value.find_first_not_of(" \t"), last = value.find_last_not_of(" \t");
+    value = first == std::string::npos ? "" : value.substr(first, last - first + 1);
+    return true;
+}
+
+static size_t ContentLength(const std::string& head)
+{
+    std::string value;
+    return HeaderValue(head, "content-length:", value) ? strtoul(value.c_str(), nullptr, 10) : 0;
+}
+
+// Browsers send Origin on cross-site requests, and a Host header with the page's own name; local
+// programs (the companion, the tools, curl) send neither, or a loopback Host. Refusing both stops a
+// web page from triggering requests here (CSRF) or reading answers through DNS rebinding.
+static bool FromLocalProgram(const std::string& head)
+{
+    std::string value;
+    if (HeaderValue(head, "origin:", value))
+        return false;
+    if (!HeaderValue(head, "host:", value))
+        return true;
+    size_t colon = value.rfind(':');
+    if (colon != std::string::npos && value.find(']', colon) == std::string::npos)
+        value.resize(colon);
+    return value == "127.0.0.1" || value == "localhost" || value == "[::1]";
 }
 
 static void MethodNotAllowed(SOCKET s, const char* allow, const char* usage)
@@ -376,6 +405,12 @@ static void HandleConnection(SOCKET s)
     // Read the whole body: /queue takes its parameters from it, and closing the socket with unread
     // data would reset the connection before the client has read the response.
     size_t bodyLen = ContentLength(req.substr(0, headerEnd + 2));
+    if (!FromLocalProgram(req.substr(0, headerEnd + 2)))
+    {
+        Log("http: refused a request from a web page (Origin header or non-loopback Host)");
+        Respond(s, 403, "{\"result\":\"forbidden\",\"message\":\"only programs on this PC may use this interface\"}");
+        return;
+    }
     if (bodyLen > kMaxBody)
     {
         Respond(s, 413, "{\"result\":\"error\",\"message\":\"body too large\"}");

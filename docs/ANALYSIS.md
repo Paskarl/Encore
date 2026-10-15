@@ -1,6 +1,6 @@
 # How the rescan function was found
 
-This is a record of the reverse engineering behind Encore: the steps, why each was taken, the
+This is a record of the reverse engineering behind Pick: the steps, why each was taken, the
 dead ends, and the evidence. It is meant to let you (or a future Claude session) repeat the
 analysis after a game update.
 
@@ -33,7 +33,7 @@ say where their code is.
 
 ## 3. Runtime dump through the IL2CPP API
 
-Dumpers like Il2CppDumper or Cpp2IL were not installed. Instead, Encore's DLL asks the game's own
+Dumpers like Il2CppDumper or Cpp2IL were not installed. Instead, Pick's DLL asks the game's own
 IL2CPP runtime: `GameAssembly.dll` exports `il2cpp_class_get_methods` and friends, and a method's
 native address is the first field of its `MethodInfo`.
 
@@ -52,7 +52,7 @@ Dead ends here:
 - **Wrong assembly name.** The game code is not in `Assembly-CSharp.dll` (Unity's default name)
   but in **`CloneHero.dll`**. The log's assembly list showed this.
 
-The dump (now enabled with `ENCORE_DUMP=1`) showed that method names and some field names are
+The dump (now enabled with `PICK_DUMP=1`) showed that method names and some field names are
 **obfuscated**, e.g. `ʺʹˀˁʿʻʳʹʻʵʳ`. Class names and most fields are not. Relevant parts:
 
 ```
@@ -173,9 +173,9 @@ coroutine refreshes it:
 
 ## 6. Runtime notes
 
-- `Resources.FindObjectsOfTypeAll` is stripped from this build, so Encore uses
+- `Resources.FindObjectsOfTypeAll` is stripped from this build, so Pick uses
   `Object.FindObjectsOfType(Type)`.
-- The game must be reached through its main thread. Encore uses the window procedure, which also
+- The game must be reached through its main thread. Pick uses the window procedure, which also
   provides the F5 key messages.
 - Testing could not be automated:
   - Clone Hero reads input through Rewired/raw input, so posted key messages don't move through
@@ -193,7 +193,7 @@ confirmed. The rest of this section is the static analysis as it was done.
 
 ### Method
 
-- `ENCORE_DUMP_FILTER` selects which classes the dump covers; `*` dumps all 1451 classes of
+- `PICK_DUMP_FILTER` selects which classes the dump covers; `*` dumps all 1451 classes of
   `CloneHero.dll`. The full dump is what made it possible to find obfuscated classes by their field
   types: searching for `List<SongEntry>` revealed the song library class.
 - [`tools/find-callers.ps1`](../tools/find-callers.ps1) separated real methods from decoys again.
@@ -240,7 +240,7 @@ Relevant static methods:
 `SetlistMenu` has three methods with this signature. `find-callers` shows `0x13deb0` with 8 callers
 (SongSelect, SongOptions, one more class), `0x13c650` with 1 and `0x13cd10` with none. `0x13c650`
 is a near-identical copy of `0x13deb0` (it differs only in two internal calls) and has one caller
-in that third class, so "the only candidate with outside callers" does not hold here. Encore
+in that third class, so "the only candidate with outside callers" does not hold here. Pick
 accepts the candidate with clearly the most outside callers (at least 3, and at least twice any
 other).
 
@@ -312,20 +312,20 @@ It also writes a "next song" text (`nextSong`, from `setlistSongs[setlistIndex +
 screen opens. So a song appended while the last song's end screen is already showing would be
 dropped by "continue" (which then clears the setlist). The prototype handles this: if the end
 screen is open with `isLastSong` set and the `setlist_end` panel active, it clears the flag and
-swaps the panels to `setlist`. Encore doesn't touch the "next song" text; in the test the
+swaps the panels to `setlist`. Pick doesn't touch the "next song" text; in the test the
 end screen looked as planned anyway.
 
 ### Prototype and runtime results
 
-Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore-queue.ps1`):
+Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/pick-queue.ps1`):
 
 - **Detection** works as designed: one library class, one setlist triple at static offsets
   `0x20/0x28/0x30`, `SetlistMenu.Add` = `0x13deb0` (8 vs 1 vs 0 outside callers), `isLastSong`
   = EndOfSong `+0xa1` (first own bool that is not a backing field).
 - **All songs:** `+0x00` and `+0x38` hold the full library (1649), `+0xb8` 1541, `+0x10` is empty.
-  Encore looks songs up in the largest list.
+  Pick looks songs up in the largest list.
 - **The string list** holds `""` for a song added with the game's button; the speed was 100.
-  `GlobalVariables.originalSongSpeed` is 0 until a song has been played, so Encore falls back to
+  `GlobalVariables.originalSongSpeed` is 0 until a song has been played, so Pick falls back to
   100 then.
 - **Song list:** queueing through `SetlistMenu.Add` showed the song in the setlist panel
   immediately (Shadow Moses after Biology, added by the user).
@@ -339,7 +339,7 @@ Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore
 
 ### Open questions
 
-- The speed the game passes is the speed setting (settings class static `+0x10`), which Encore
+- The speed the game passes is the speed setting (settings class static `+0x10`), which Pick
   does not read yet; it uses `originalSongSpeed`, which can be stale if the speed was changed in
   the menu since the last song (or 0 → 100 before the first one).
 - Online/multiplayer setlists were not tested.
@@ -347,13 +347,13 @@ Tested 2026-10-15 with v1.1.0.6142 (`POST /queue`, `GET /setlist`, `tools/encore
 
 ## 8. Main menu entry
 
-**Goal:** an "Encore" entry in the main menu that starts the companion and shows its address and
+**Goal:** a "Pick" entry in the main menu that starts the companion and shows its address and
 a pairing code in the game's own dialog. Status: working, tested in the game on 2026-10-15
 (entry drawn like the others, dialog shown, phone paired with the code, other entries unchanged).
 
 ### Method
 
-Fields and signatures came from a full class dump (`ENCORE_DUMP_FILTER=*`); code from slices of
+Fields and signatures came from a full class dump (`PICK_DUMP_FILTER=*`); code from slices of
 `1c0000-1d8000` (MainMenu, BaseMenu), `399000-39b000` (ConfirmationMenu), `12e000-130000` and
 `346000-34b000` (text lookup). `find-callers.ps1` checked direct callers, `dumpbin /pdata` the
 function chunks.
@@ -432,8 +432,8 @@ key (null = one button), on option 1, on option 2 (null = just close), body text
 ### Text lookup
 
 Labels and dialog titles go through `<obf>.Get(key, fallback)` @ `0x3499b0`: on a missing key it
-logs `<Missing i18n Resource>: key:en` to `Player.log` and returns the key itself. So "Encore",
-"Encore companion" and "OK" are shown as written.
+logs `<Missing i18n Resource>: key:en` to `Player.log` and returns the key itself. So "Pick",
+"Pick companion" and "OK" are shown as written.
 
 ### Unity methods available in this build
 
@@ -447,24 +447,24 @@ bool)`, `get_parent`, `get_localPosition`/`set_localPosition`, `TMP_Text.set_tex
 
 - **Hook:** the confirm slot is a plain data write in the heap-allocated `Il2CppClass` (checked
   writable), done once when the first MainMenu instance is alive (classes initialised). The
-  wrapper handles the "Encore" key and calls the original method for everything else.
-- **Entry:** Encore clones the last row's background and then its label with
+  wrapper handles the "Pick" key and calls the original method for everything else.
+- **Entry:** Pick clones the last row's background and then its label with
   `Instantiate(…, parent, false)` and places them one step below (step = last row minus the one
   before). Order matters: a clone becomes its parent's last child and is drawn on top, so cloning
   the label first put the background over it (label dimmed, hidden when highlighted). It then
-  appends the new row to `textObjects` and `backgroundObjects`, inserts the "Encore" key into
+  appends the new row to `textObjects` and `backgroundObjects`, inserts the "Pick" key into
   `menuStrings` after the "Practice" key (5th of 8; appended if that key is missing), and sets
   visible count / max scroll by the count formula, after checking that the live values match that
   formula. Rows draw `menuStrings[i]`, so the rows below shift one down and the copied row shows
-  Quit; Encore relabels them at once (TMP `get_text`/`set_text`) and inserts only while the
+  Quit; Pick relabels them at once (TMP `get_text`/`set_text`) and inserts only while the
   highlight is above the insert point. MainMenu never selects an entry by index (no
   `call [reg+0x458]` "select index" or writes to the selection fields in its code; `0x1d55b0`
   selects by string), and the confirm method dispatches by key, so the order is free.
 - **Intro animation:** the menu slides its rows in when it opens. Cloning during the slide put
-  the copy on top of Quit (step 0); Encore waits until the last two rows' positions have been
+  the copy on top of Quit (step 0); Pick waits until the last two rows' positions have been
   stable for three ticks (1.5 s) and keeps the copy one step below its source afterwards (the
   slide repeats on every return to the menu).
-- **Companion:** a worker thread starts `EncoreCompanion.exe` if nothing answers on
+- **Companion:** a worker thread starts `PickCompanion.exe` if nothing answers on
   127.0.0.1:47322 and asks it for a 6-digit code (`POST /pair/code`, loopback only). The result is
   posted to the window procedure, which opens `notSupportedMenu` with the address and code.
 - MainMenu is created again whenever the menu scene loads; a 500 ms timer adds the entry to each
@@ -472,19 +472,19 @@ bool)`, `get_parent`, `get_localPosition`/`set_localPosition`, `TMP_Text.set_tex
 
 ## After a game update
 
-1. Install the freshly built `version.dll`, start the game and read `encore.log`.
+1. Install the freshly built `version.dll`, start the game and read `pick.log`.
 2. If it says `ready`, you're done.
 3. **If `StartScan ambiguous`:**
-   - set `ENCORE_DUMP=1` and start the game once;
+   - set `PICK_DUMP=1` and start the game once;
    - run `tools/find-callers.ps1` with the candidate RVAs from the log and the new
-     `encore_methods.tsv`;
+     `pick_methods.tsv`;
    - decompile the candidates and callers with `tools/make-slice.ps1` + REA, and see what changed
      (step 5 above is the reference).
 4. **If `resolve … FAILED`:** check in the dump whether `SongScan`/`SongSelect` or one of the
    fields was renamed.
 5. **If `menu resolve: … FAILED` or `menu: vtable check failed`:** the log names the missing piece
    or the candidate counts. Section 8 lists what each check expects; decompile `MainMenu`,
-   `BaseMenu` and `ConfirmationMenu` again and compare. The rest of Encore works without the
-   menu entry, and `ENCORE_MENU=0` turns it off.
+   `BaseMenu` and `ConfirmationMenu` again and compare. The rest of Pick works without the
+   menu entry, and `PICK_MENU=0` turns it off.
 
 Keep dumps, slices and decompiled output local. They are derived from the game's code.

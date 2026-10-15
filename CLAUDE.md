@@ -1,4 +1,4 @@
-# Encore
+# Pick
 
 Native Windows DLL that adds a song rescan to Clone Hero's song list, triggered by F5 or by other
 applications through a loopback HTTP endpoint (`POST /rescan`, `GET /status` on
@@ -17,13 +17,13 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
 - Build: `build.bat` (MSVC x64 from VS 2022 Build Tools, compiles with `/utf-8`) → `build\version.dll`
 - Game folder: `C:\Users\pasca\Documents\cloneHero\Clone Hero`. Copy `build\version.dll` there.
   The copy fails while the game is running, because the DLL is loaded and locked.
-- Log: `encore.log` in the game folder. `ENCORE_DUMP=1` adds a class dump and `encore_methods.tsv`.
+- Log: `pick.log` in the game folder. `PICK_DUMP=1` adds a class dump and `pick_methods.tsv`.
 - The F5 test inside the song list must be done by the user. Posted keys can't navigate the menus
   (Rewired/raw input), and window captures come out black. `tools/gamectl.ps1` can only test F5
   outside the song list.
-- The HTTP trigger can be tested from here with `tools/encore-rescan.ps1` (`-Status`, `-Wait`).
+- The HTTP trigger can be tested from here with `tools/pick-rescan.ps1` (`-Status`, `-Wait`).
   Outside the song list it must answer `not_in_song_list`; the in-list refresh needs the user.
-- The queue can be driven from here with `tools/encore-queue.ps1` (`-Title`, `-Checksum`, `-List`)
+- The queue can be driven from here with `tools/pick-queue.ps1` (`-Title`, `-Checksum`, `-List`)
   while the user navigates. `GET /setlist` also writes the library and setlist state to the log
   (only when it changed, because the companion polls it).
 - `GET /library` works in any menu and can be tested from here with curl.
@@ -31,17 +31,17 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
   tab so the user sees the QR code. This session's sandbox sees its own copy of `%LOCALAPPDATA%`,
   so the token file read from Bash may differ from the one the real process uses; take the token
   from the companion's console output. The phone test must be done by the user.
-- Main-menu entry: Encore starts the published companion from
-  `<game folder>\EncoreCompanion\EncoreCompanion.exe` (`dotnet publish companion -c Release -o …`;
+- Main-menu entry: Pick starts the published companion from
+  `<game folder>\PickCompanion\PickCompanion.exe` (`dotnet publish companion -c Release -o …`;
   republish after companion changes, while it isn't running). The menu look and the dialog can
-  only be checked by the user (screenshots); the detection result is in `encore.log` (`menu …`).
+  only be checked by the user (screenshots); the detection result is in `pick.log` (`menu …`).
 
 ## Rules
 
 - Call IL2CPP only on Unity's main thread (the subclassed window procedure). Off-thread calls that
   allocate abort the game with "Fatal error in GC". The bootstrap thread may only poll
   `il2cpp_get_corlib()`. The HTTP listener thread follows the same rule: it only does socket work
-  and hands every request to the window procedure with `SendMessageTimeout(WM_ENCORE_TRIGGER)`.
+  and hands every request to the window procedure with `SendMessageTimeout(WM_PICK_TRIGGER)`.
 - Every rescan trigger goes through `TriggerRescanFromSongList(source)`; don't duplicate its checks.
   Rescans are refused outside the song list (unsafe during gameplay/loading).
 - Requests that answer with JSON from the main thread (`/queue`, `/setlist`, `/library`) pass a refcounted
@@ -65,7 +65,7 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
   loopback with a loopback Host header; `/pair/claim` trades it for the token once (10 minutes,
   void after 5 wrong guesses). Keep those limits.
 - Main-menu entry: the only code-path change in the game is one vtable slot (MainMenu's confirm
-  method); the wrapper must call the original for every entry but "Encore". The entry's companion
+  method); the wrapper must call the original for every entry but "Pick". The entry's companion
   start and code request run on a worker thread (`companion_launcher.cpp`, no IL2CPP); the result
   is posted to the window procedure, which opens the dialog. Any failed check leaves the menu
   untouched (`menu …` in the log).
@@ -82,11 +82,11 @@ usable from a phone on the LAN, and downloads missing charts from enchor.us.
 - Don't hard-code RVAs or obfuscated names in `src/`. Resolve by unobfuscated class/field names, or
   by behaviour (see the StartScan caller test). If detection is ambiguous, disable the feature and
   log it; never guess.
-- Never commit dumps, slices or decompiled output (`*.tsv`, `encore.log`, `*_slice*.dll`). They are
+- Never commit dumps, slices or decompiled output (`*.tsv`, `pick.log`, `*_slice*.dll`). They are
   derived from the game's code; `.gitignore` covers them.
 - REA can't analyse the full 70 MB `GameAssembly.dll` (Ghidra startup timeout). Use
   `tools/make-slice.ps1` and open the slice instead. To see who uses a class's statics, run
   `tools/find-refs.ps1` on its class-pointer global (the `DAT_183…` value in pseudocode); for who
-  calls a method, `tools/find-callers.ps1`. `ENCORE_DUMP_FILTER=*` dumps every class.
+  calls a method, `tools/find-callers.ps1`. `PICK_DUMP_FILTER=*` dumps every class.
 - PowerShell 5.1: pass commit messages with `git commit -F <file>`, because quotes in `-m` get
   mangled. Write files without a BOM.

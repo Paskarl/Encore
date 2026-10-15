@@ -42,17 +42,17 @@ jobs:
           -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none
           -p:IsWebConfigTransformDisabled=true -p:Version=${{ steps.version.outputs.version }}
-          -o package/EncoreCompanion
+          -o package/PickCompanion
 
-      # The zip's contents go straight into the Clone Hero folder, so the docs get Encore names.
+      # The zip's contents go straight into the Clone Hero folder, so the docs get Pick names.
       - name: Package
         shell: pwsh
         run: |
           Copy-Item build/version.dll package/
-          Copy-Item README.md package/Encore-README.md
-          Copy-Item docs/SECURITY.md package/Encore-SECURITY.md
-          if (Test-Path LICENSE) { Copy-Item LICENSE package/Encore-LICENSE.txt }
-          $zip = "Encore-${{ steps.version.outputs.version }}.zip"
+          Copy-Item README.md package/Pick-README.md
+          Copy-Item docs/SECURITY.md package/Pick-SECURITY.md
+          if (Test-Path LICENSE) { Copy-Item LICENSE package/Pick-LICENSE.txt }
+          $zip = "Pick-${{ steps.version.outputs.version }}.zip"
           Compress-Archive -Path package/* -DestinationPath $zip
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $zip" | Set-Content -Encoding ascii "$zip.sha256"
@@ -61,10 +61,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Encore-${{ steps.version.outputs.version }}
+          name: Pick-${{ steps.version.outputs.version }}
           path: |
-            Encore-*.zip
-            Encore-*.zip.sha256
+            Pick-*.zip
+            Pick-*.zip.sha256
 
   release:
     needs: build
@@ -80,6 +80,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create "$GITHUB_REF_NAME" Encore-*.zip Encore-*.zip.sha256
-          --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Encore $GITHUB_REF_NAME"
-          --notes "Unofficial mod for Clone Hero v1.1.0.6142 (Windows). Install: see Encore-README.md in the zip."
+          gh release create "$GITHUB_REF_NAME" Pick-*.zip Pick-*.zip.sha256
+          --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Pick $GITHUB_REF_NAME"
+          --notes "Unofficial mod for Clone Hero v1.1.0.6142 (Windows). Install: see Pick-README.md in the zip."

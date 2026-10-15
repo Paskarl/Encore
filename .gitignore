@@ -22,5 +22,5 @@ companion/obj/
 
 # Release packaging (CI)
 package/
-Encore-*.zip
-Encore-*.zip.sha256
+Pick-*.zip
+Pick-*.zip.sha256

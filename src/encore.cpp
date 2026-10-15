@@ -215,9 +215,25 @@ static void CollectMethodBodies(Il2CppClass* k, std::vector<uintptr_t>& out)
         CollectMethodBodies(nested, out);
 }
 
+// The function a RUNTIME_FUNCTION belongs to: MSVC splits large functions into chunks whose unwind
+// info is chained (UNW_FLAG_CHAININFO) to the primary entry.
+static const RUNTIME_FUNCTION* PrimaryEntry(DWORD64 imageBase, const RUNTIME_FUNCTION* rf)
+{
+    for (int depth = 0; rf && depth < 32; ++depth)
+    {
+        auto info = reinterpret_cast<const uint8_t*>(imageBase + rf->UnwindData);
+        if (!((info[0] >> 3) & UNW_FLAG_CHAININFO))
+            return rf;
+        uint8_t codes = info[2];
+        rf = reinterpret_cast<const RUNTIME_FUNCTION*>(info + 4 + ((codes + 1) & ~1) * 2);
+    }
+    return nullptr;
+}
+
 // Counts `call rel32` / `jmp rel32` sites in GameAssembly.dll's executable sections that target
 // each candidate, ignoring sites inside the class's own methods. Sites must lie inside a function
-// known to the x64 unwind tables, which filters out byte patterns in padding and data.
+// known to the x64 unwind tables, which filters out byte patterns in padding and data. A site in a
+// chained chunk belongs to the chunk's primary entry, so that is what is compared with ownBodies.
 static std::vector<int> CountExternalCallers(const std::vector<uintptr_t>& targets,
                                              const std::vector<uintptr_t>& ownBodies)
 {
@@ -244,7 +260,8 @@ static std::vector<int> CountExternalCallers(const std::vector<uintptr_t>& targe
                 if (target != targets[t])
                     continue;
                 DWORD64 imageBase = 0;
-                PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(site, &imageBase, nullptr);
+                PRUNTIME_FUNCTION chunk = RtlLookupFunctionEntry(site, &imageBase, nullptr);
+                const RUNTIME_FUNCTION* fn = chunk ? PrimaryEntry(imageBase, chunk) : nullptr;
                 if (!fn)
                     break;
                 uintptr_t caller = static_cast<uintptr_t>(imageBase) + fn->BeginAddress;
@@ -1473,21 +1490,6 @@ static Il2CppObject* ArrayAppend(Il2CppObject* arr, Il2CppObject* extra)
         il2cpp_gc_wbarrier_set_field(out, reinterpret_cast<void**>(&ArrayItem(out, i)), ArrayItem(arr, i));
     il2cpp_gc_wbarrier_set_field(out, reinterpret_cast<void**>(&ArrayItem(out, n)), extra);
     return out;
-}
-
-// The function a RUNTIME_FUNCTION belongs to: MSVC splits large functions into chunks whose unwind
-// info is chained (UNW_FLAG_CHAININFO) to the primary entry.
-static const RUNTIME_FUNCTION* PrimaryEntry(DWORD64 imageBase, const RUNTIME_FUNCTION* rf)
-{
-    for (int depth = 0; rf && depth < 32; ++depth)
-    {
-        auto info = reinterpret_cast<const uint8_t*>(imageBase + rf->UnwindData);
-        if (!((info[0] >> 3) & UNW_FLAG_CHAININFO))
-            return rf;
-        uint8_t codes = info[2];
-        rf = reinterpret_cast<const RUNTIME_FUNCTION*>(info + 4 + ((codes + 1) & ~1) * 2);
-    }
-    return nullptr;
 }
 
 // The machine code of the function starting at fn. Its extent comes from the x64 unwind tables:
